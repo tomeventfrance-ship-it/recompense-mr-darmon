@@ -1,12 +1,10 @@
-# utils.py  — version complète
+# utils.py — version stable (alignements corrigés)
 
 import io, re
 import pandas as pd
 import numpy as np
 
-# ----------------------
-# 1) Lecture & mapping
-# ----------------------
+# ---------- Lecture & mapping ----------
 CANDIDATES = {
     "diamants": ["Diamants","Total diamants","Nombre de diamants","Diamonds"],
     "heures":   ["Durée de live (heures)","Durée de live","Heures de live","Temps de live (h)"],
@@ -39,7 +37,6 @@ def _pick(df:pd.DataFrame, keys)->str|None:
     return None
 
 def load_df(file_like)->pd.DataFrame:
-    """Lit CSV/XLSX, garde uniquement les colonnes utiles et les renomme."""
     name = getattr(file_like,"name","")
     if isinstance(file_like,(bytes,bytearray)):
         bio=io.BytesIO(file_like); bio.name=name; file_like=bio
@@ -64,20 +61,13 @@ def load_df(file_like)->pd.DataFrame:
     for num in ["diamants","heures","jours"]:
         df[num]=pd.to_numeric(df[num],errors="coerce").fillna(0)
 
-    # conversions texte sécurisées
     for s in ["user","agent","manager","al","deja150","bonus_used"]:
-        if s in df.columns and not isinstance(df[s], pd.DataFrame):
-            df[s]=df[s].astype(str).replace({"nan":""}).str.strip()
-        else:
-            df[s]=""
+        df[s]=df[s].astype(str).replace({"nan":""}).str.strip()
 
     return df[CANON]
 
-# ----------------------
-# 2) Barèmes & bonus
-# ----------------------
+# ---------- Barèmes ----------
 def palier1_reward(d):
-    # Palier 1 (>=2M -> 4%)
     if d>=2_000_000: return round(d*0.04)
     table=[
         (35_000, 74_999, 1_000),
@@ -99,7 +89,6 @@ def palier1_reward(d):
     return 0
 
 def palier2_reward(d):
-    # Palier 2 (>=2M -> 4%)
     if d>=2_000_000: return round(d*0.04)
     table=[
         (35_000, 74_999, 1_000),
@@ -120,40 +109,38 @@ def palier2_reward(d):
         if a<=d<=b: return v
     return 0
 
-def debutant_bonus(d, al_flag:str, bonus_used:str):
-    """AL = 'débutant non diplômé 90j' → bonus unique, non cumulable, selon diamant."""
-    if str(bonus_used).strip().lower() in {"1","true","oui","yes","used"}:
-        return 0, "Non validé"
-    if _norm(al_flag) not in {"al","debutant non diplome 90j","debutant non diplome 90 j","debutant"}:
-        return 0, "Non validé"
+def _is_true(s:str)->bool:
+    return _norm(s) in {"1","true","vrai","oui","yes","used"}
 
-    if 75_000<=d<=149_999:  return 500,  "Validé"
-    if 150_000<=d<=499_999: return 1088, "Validé"
-    if 500_000<=d<=2_000_000: return 3000, "Validé"
-    return 0, "Non validé"
+def debutant_bonus_series(diamants:pd.Series, al:pd.Series, bonus_used:pd.Series)->tuple[pd.Series,pd.Series]:
+    al_ok = al.map(lambda x: _norm(x) in {"al","debutant non diplome 90j","debutant non diplome 90 j","debutant"})
+    not_used = ~bonus_used.map(_is_true)
+    elig = al_ok & not_used
 
-# ----------------------
-# 3) Créateurs
-# ----------------------
+    b = pd.Series(0, index=diamants.index, dtype=int)
+    b = np.where(elig & (diamants.between(75_000,149_999)), 500, b)
+    b = np.where(elig & (diamants.between(150_000,499_999)),1088, b)
+    b = np.where(elig & (diamants.between(500_000,2_000_000)),3000, b)
+    b = pd.Series(b, index=diamants.index, dtype=int)
+
+    flag = pd.Series(np.where(b>0,"Validé","Non validé"), index=diamants.index)
+    return b, flag
+
+# ---------- Créateurs ----------
 def compute_creators_table(df:pd.DataFrame)->pd.DataFrame:
-    # Actif base : (>=12 jours & >=25 h) OU (diamants >= 150k)
+    idx = df.index
+
     actif = ((df["jours"]>=12) & (df["heures"]>=25)) | (df["diamants"]>=150_000)
     palier2 = (df["jours"]>=20) & (df["heures"]>=80)
 
     r1 = df["diamants"].apply(palier1_reward)
     r2 = df["diamants"].apply(palier2_reward)
 
-    # Affichage : si palier2 validé → on n’affiche pas Palier1
-    aff_p1 = np.where(palier2, 0, r1)
-    aff_p2 = np.where(palier2, r2, 0)
+    aff_p1 = pd.Series(np.where(palier2, 0, r1), index=idx, dtype=int)
+    aff_p2 = pd.Series(np.where(palier2, r2, 0), index=idx, dtype=int)
 
-    # Bonus débutant (unique)
-    bonus_vals=[]; bonus_flags=[]
-    for d,al,bu in zip(df["diamants"], df["al"], df["bonus_used"]):
-        b, flag = debutant_bonus(d, al, bu)
-        bonus_vals.append(b); bonus_flags.append(flag)
-
-    total = aff_p1 + aff_p2 + np.array(bonus_vals)
+    bonus_vals, bonus_flags = debutant_bonus_series(df["diamants"], df["al"], df["bonus_used"])
+    total = (aff_p1 + aff_p2 + bonus_vals).astype(int)
 
     out = pd.DataFrame({
         "Nom d’utilisateur": df["user"].replace({"":"(non fourni)"}),
@@ -164,19 +151,16 @@ def compute_creators_table(df:pd.DataFrame)->pd.DataFrame:
         "Jours de passage en live": df["jours"].astype(int),
         "Actif": np.where(actif,"Validé","Non validé"),
         "Palier 2": np.where(palier2,"Validé","Non validé"),
-        "Récompense palier 1": aff_p1.astype(int),
-        "Récompense palier 2": aff_p2.astype(int),
-        "Bonus débutant": bonus_flags,
-        "Récompense totale": total.astype(int),
-    })
+        "Récompense palier 1": aff_p1.values,
+        "Récompense palier 2": aff_p2.values,
+        "Bonus débutant": bonus_flags.values,
+        "Récompense totale": total.values,
+    }, index=idx)
 
-    # Tri par diamants desc
     out = out.sort_values(by=["Diamants","Récompense totale"], ascending=[False,False]).reset_index(drop=True)
     return out
 
-# ----------------------
-# 4) Agents (agrégé sur créateurs actifs)
-# ----------------------
+# ---------- Agents ----------
 def _agent_reward(sum_active:int)->int:
     if sum_active < 200_000:
         return 0
@@ -204,18 +188,16 @@ def compute_agents_table(df:pd.DataFrame)->pd.DataFrame:
 
     return out
 
-# ----------------------
-# 5) Managers (agrégé sur créateurs actifs) + bonus 3=5000/créateur
-# ----------------------
+# ---------- Managers ----------
 def compute_managers_table(df:pd.DataFrame)->pd.DataFrame:
     actif = ((df["jours"]>=12) & (df["heures"]>=25)) | (df["diamants"]>=150_000)
-    palier3 = df["diamants"]>=500_000  # sert juste à compter les bonus 3 côté manager
+    palier3 = df["diamants"]>=500_000
 
     g = df.groupby("manager", dropna=False)
     total = g["diamants"].sum().astype(int)
     actifs = df.loc[actif].groupby("manager", dropna=False)["diamants"].sum().reindex(total.index).fillna(0).astype(int)
 
-    base_reward = actifs.apply(_agent_reward).astype(int)  # même barème que les agents (tu avais validé la logique)
+    base_reward = actifs.apply(_agent_reward).astype(int)
     bonus_3 = df.loc[palier3].groupby("manager", dropna=False)["diamants"].count().reindex(total.index).fillna(0).astype(int)*5000
     perte = (total - actifs).astype(int)
 
