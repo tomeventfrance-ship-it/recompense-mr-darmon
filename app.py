@@ -1,37 +1,45 @@
 import streamlit as st
 import pandas as pd
+from utils import compute_creators_table  # ta fonction de calcul principale
 
-# --- Configuration principale de la page
-st.set_page_config(
-    page_title="Récompenses - Créateurs",
-    page_icon="💎",
-    layout="wide"
-)
+# Configuration de la page
+st.set_page_config(page_title="Récompenses - Créateurs", page_icon="💎", layout="wide")
 
-# --- Titre
-st.title("💎 Récompenses - Créateurs")
-st.caption("Automatisation des récompenses pour Créateurs, Agents et Managers.")
+st.title("💎 Récompenses – Créateurs")
+st.write("Automatisation des récompenses pour les créateurs de contenu Tom Consulting & Event.")
 
-# --- Import de fichier
-uploaded_file = st.file_uploader("Importez votre fichier Excel (.xlsx / .csv)", type=["xlsx", "csv"])
+# Zone d'import du fichier
+uploaded = st.file_uploader("📂 Importez votre fichier (.xlsx ou .csv)", type=["xlsx", "csv"])
 
-if uploaded_file:
+if uploaded:
+    # Lecture du fichier complet
     try:
-        if uploaded_file.name.endswith(".csv"):
-            df = pd.read_csv(uploaded_file)
+        if uploaded.name.lower().endswith(".csv"):
+            df_raw = pd.read_csv(uploaded)
         else:
-            df = pd.read_excel(uploaded_file)
+            df_raw = pd.read_excel(uploaded)
 
         st.success("✅ Fichier importé avec succès !")
-        st.dataframe(df.head())
 
-        # Exemple simple de traitement
-        if 'Récompense palier 1' in df.columns and 'Récompense palier 2' in df.columns:
-            df['Récompense totale'] = df[['Récompense palier 1', 'Récompense palier 2']].sum(axis=1)
-            st.write("### Aperçu des récompenses totales calculées :")
-            st.dataframe(df[['Nom d’utilisateur', 'Récompense totale']].head())
+        # Application des calculs du tableau créateurs
+        df_result = compute_creators_table(df_raw)
+
+        # Aperçu visuel (les 10 premières lignes seulement)
+        st.subheader("Aperçu du tableau calculé (10 premières lignes)")
+        st.dataframe(df_result.head(10), use_container_width=True)
+
+        # Téléchargement du fichier complet
+        csv_bytes = df_result.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="⬇️ Télécharger le tableau complet (CSV)",
+            data=csv_bytes,
+            file_name="recompenses_createurs_complet.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
 
     except Exception as e:
-        st.error(f"Erreur lors de la lecture du fichier : {e}")
+        st.error(f"❌ Erreur lors du traitement du fichier : {e}")
+
 else:
-    st.info("Importez un fichier pour démarrer.")
+    st.info("👉 Importez votre fichier pour démarrer le calcul automatique.")
