@@ -1,322 +1,298 @@
-# utils.py
-from __future__ import annotations
 import io
-from typing import Optional, Dict, List, Tuple, Set
-
-import numpy as np
+import re
 import pandas as pd
+import numpy as np
 
-# =========================
-#   Détection des colonnes
-# =========================
-CANON = {
-    "diamonds": [
-        "diamants", "diamant", "diamonds", "nombre de diamants", "nb_diamants", "total diamonds"
+# --------- MAPPING STRICT : on ne lit que ce qui sert ------------
+CANDIDATES = {
+    "diamants": [
+        "Diamants","Total diamants","Nombre de diamants","Diamonds"
     ],
-    "hours": [
-        "durée de live (heures)", "duree de live (heures)", "heures de live", "heure de live",
-        "duree de live", "durée live", "temps en live (h)", "live hours", "nb heures live"
+    "heures": [
+        "Durée de live (heures)","Durée de live","Heures de live",
+        "Temps de live (h)","Durée (heures)","Durée du live (h)"
     ],
-    "days": [
-        "jours de passage en live", "jour de passage en live", "jours actifs", "jours de live",
-        "jours en live", "nb jours live", "live days", "jours"
+    "jours": [
+        "Jours de passage en live","Jours de live","Nombre de jours de live",
+        "Jours passes en live","Jours (live)"
     ],
-    "agent": ["agent", "email agent", "mail agent", "e-mail agent", "colonne e", "col e"],
-    "manager": ["groupe", "manager", "group", "groupe (manager)", "colonne d", "col d"],
-    "user": ["nom d’utilisateur", "nom d'utilisateur", "username", "user", "pseudo", "tiktok name", "creator"],
-    "al": ["al", "débutant non diplômé 90j", "debutant non diplome 90j", "debutant 90j", "debutant"]
+    "agent": ["Agent","Agent (col.E)","Agent(e)"],
+    "manager": ["Groupe/Manager","Manager","Groupe","Groupe (col.D)"],
+    "user": ["Nom d’utilisateur","Nom d'utilisateur","Username","Utilisateur","Pseudo","Nom d’utilisateur (si dispo)"],
+    "al": ["AL","Débutant non diplômé 90j","Debutant non diplome 90j","Debutant 90j"],
+    # indicateur historique "a déjà fait 150k" (optionnel)
+    "deja150": ["déjà 150k","deja 150k","a deja fait 150k","historique 150k"],
+    # indicateur bonus déjà utilisé (optionnel)
+    "bonus_used": ["bonus_deja_utilise","bonus déjà utilisé","bonus utilise","bonus_used"]
 }
 
+CANON = ["user","manager","agent","diamants","heures","jours","al","deja150","bonus_used"]
+
 def _norm(s: str) -> str:
-    return (s or "").strip().lower().replace("\xa0"," ").replace("’","'")
-
-def _best_match(colnames: List[str], candidates: List[str]) -> Optional[str]:
-    base = [_norm(c) for c in candidates]
-    # match exact
-    for c in colnames:
-        if _norm(c) in base:
-            return c
-    # contains
-    for c in colnames:
-        n = _norm(c)
-        if any(x in n for x in base):
-            return c
-    return None
-
-def _colmap(df: pd.DataFrame) -> Dict[str, Optional[str]]:
-    cols = list(df.columns)
-    out: Dict[str, Optional[str]] = {}
-    for key, cand in CANON.items():
-        out[key] = _best_match(cols, cand)
-    return out
-
-# =========================
-#       IO helpers
-# =========================
-def load_df(uploaded) -> pd.DataFrame:
-    """Lit CSV/XLSX depuis uploader Streamlit ou path/bytes, conserve toutes les colonnes."""
-    name = getattr(uploaded, "name", str(uploaded))
-    if isinstance(uploaded, (bytes, bytearray)):
-        uploaded = io.BytesIO(uploaded)
-        name = "upload.bin"
-    if name.lower().endswith(".csv"):
-        return pd.read_csv(uploaded)
-    return pd.read_excel(uploaded)
-
-# =========================
-#   Historique – >=150k
-# =========================
-def extract_150k_users(df: pd.DataFrame) -> Set[str]:
-    roles = _colmap(df)
-    c_diam, c_user = roles.get("diamonds"), roles.get("user")
-    if not c_diam or not c_user:
-        return set()
-    s = pd.to_numeric(df[c_diam], errors="coerce").fillna(0)
-    return set(df.loc[s >= 150000, c_user].astype(str).str.strip())
-
-def merge_history(*dfs: pd.DataFrame) -> Set[str]:
-    users: Set[str] = set()
-    for d in dfs:
-        users |= extract_150k_users(d)
-    return users
-
-# =========================
-# Historique – bonus débutant (one-shot à vie)
-# =========================
-def extract_bonus_users(df: pd.DataFrame) -> Set[str]:
-    # essaie de trouver le nom d'utilisateur
-    name_col = None
-    for c in df.columns:
-        cl = _norm(str(c))
-        if ("nom d'utilisateur" in cl) or ("nom d’utilisateur" in cl) or ("username" in cl) or (cl == "user") or ("pseudo" in cl):
-            name_col = c; break
-    if not name_col:
-        return set()
-
-    # heuristique: colonne(s) contenant "bonus" et "débutant"
-    def _row_has_bonus(row) -> bool:
-        for k, v in row.items():
-            kl = _norm(str(k))
-            if ("bonus" in kl) and ("debutant" in kl or "débutant" in kl):
-                try:
-                    return int(v) > 0
-                except:
-                    return str(v).strip().lower() in {"validé","valide","true","1","oui","yes","y","o"}
-        return False
-
-    mask = df.apply(_row_has_bonus, axis=1)
-    return set(df.loc[mask, name_col].astype(str).str.strip())
-
-def merge_bonus_history(*dfs: pd.DataFrame) -> Set[str]:
-    s: Set[str] = set()
-    for d in dfs:
-        s |= extract_bonus_users(d)
+    s = s.lower()
+    s = s.encode("ascii","ignore").decode()
+    s = re.sub(r"[^a-z0-9 ]+"," ",s)
+    s = re.sub(r"\s+"," ",s).strip()
     return s
 
-# =========================
-#     Barèmes / Bonus
-# =========================
+def _pick(df: pd.DataFrame, keys) -> str|None:
+    norm = {_norm(c): c for c in df.columns}
+    # match exact normalisé
+    for k in keys:
+        n = _norm(k)
+        if n in norm:
+            return norm[n]
+    # match partiel tolérant
+    for k in keys:
+        nk = _norm(k)
+        for c in df.columns:
+            if nk in _norm(c):
+                return c
+    return None
+
+def load_df(file_like) -> pd.DataFrame:
+    """Lit CSV/XLSX, ne garde QUE les colonnes utiles, les renomme de façon canonique."""
+    name = getattr(file_like, "name", "")
+    if isinstance(file_like, (bytes, bytearray)):
+        bio = io.BytesIO(file_like); bio.name = name; file_like = bio
+
+    if str(name).lower().endswith(".csv"):
+        raw = pd.read_csv(file_like)
+    else:
+        raw = pd.read_excel(file_like)
+
+    found = {}
+    for canon, cand in CANDIDATES.items():
+        col = _pick(raw, cand)
+        if col is not None:
+            found[canon] = col
+
+    # 3 colonnes indispensables
+    missing_core = [k for k in ["diamants","heures","jours"] if k not in found]
+    if missing_core:
+        pretty = {"diamants":"Diamants","heures":"Durée de live (heures)","jours":"Jours de passage en live"}
+        raise ValueError("Colonnes manquantes: " + ", ".join(pretty[k] for k in missing_core))
+
+    use_cols = [found[k] for k in CANON if k in found]
+    df = raw.loc[:, use_cols].rename(columns={found[k]: k for k in found})
+
+    # ajoute les optionnelles vides si absentes
+    for opt in CANON:
+        if opt not in df.columns:
+            df[opt] = None
+
+    # types
+    for num in ["diamants","heures","jours"]:
+        df[num] = pd.to_numeric(df[num], errors="coerce").fillna(0)
+
+    # string tidy
+    for s in ["user","agent","manager","al","deja150","bonus_used"]:
+        df[s] = df[s].astype(str).replace({"nan":""}).str.strip()
+
+    return df[CANON]
+
+
+# ---------------------- RÈGLES METIER ---------------------------
+
+def deja_150k_flag(row: pd.Series) -> bool:
+    """Si la colonne historique n’existe pas/est vide => on considère 150k atteint si diamants courants >=150k."""
+    txt = str(row.get("deja150","")).strip().lower()
+    if txt in ["1","true","vrai","oui","yes","y"]:
+        return True
+    if txt in ["0","false","faux","non","no","n",""]:
+        # fallback via diamants du fichier en cours
+        return float(row["diamants"]) >= 150_000
+    return float(row["diamants"]) >= 150_000
+
+def beginner_bonus_used(row: pd.Series) -> bool:
+    txt = str(row.get("bonus_used","")).strip().lower()
+    return txt in ["1","true","vrai","oui","yes","y"]
+
+def is_active(row: pd.Series) -> bool:
+    """Validation activité selon statuts :
+       - Jamais 150k : 15h & 7j
+       - Déjà 150k (ou non-débutant) : 25h & 12j
+       Seuil minimum diamants pour considérer “actif” global: 750 (défini par toi)."""
+    if row["diamants"] < 750:
+        return False
+    if deja_150k_flag(row):
+        return (row["heures"] >= 25) and (row["jours"] >= 12)
+    else:
+        return (row["heures"] >= 15) and (row["jours"] >= 7)
+
+def palier2_valid(row: pd.Series) -> bool:
+    """Second palier: 20 jours & 80 heures."""
+    return (row["jours"] >= 20) and (row["heures"] >= 80)
+
+# Tables Palier 1 & 2
 P1 = [
-    (35000,   74999,   1000),
-    (75000,  149999,   2500),
-    (150000, 199999,   5000),
-    (200000, 299999,   6000),
-    (300000, 399999,   7999),
-    (400000, 499999,  12000),
-    (500000, 599999,  15000),
-    (600000, 699999,  18000),
-    (700000, 799999,  21000),
-    (800000, 899999,  24000),
-    (900000, 999999,  26999),
-    (1000000,1499999, 30000),
-    (1500000,1999999, 44999),
-    # >= 2,000,000 -> 4%
+    (35_000, 74_999, 1_000),
+    (75_000, 149_000, 2_500),
+    (150_000, 199_999, 5_000),
+    (200_000, 299_999, 6_000),
+    (300_000, 399_999, 7_999),
+    (400_000, 499_999, 12_000),
+    (500_000, 599_999, 15_000),
+    (600_000, 699_999, 18_000),
+    (700_000, 799_999, 21_000),
+    (800_000, 899_999, 24_000),
+    (900_000, 999_999, 26_999),
+    (1_000_000, 1_499_999, 30_000),
+    (1_500_000, 1_999_999, 44_999),
+    ("GE2M", None, 0.04),  # 4% au-delà de 2M
 ]
 P2 = [
-    (35000,   74999,   1000),
-    (75000,  149999,   2500),
-    (150000, 199999,   6000),
-    (200000, 299999,   7999),
-    (300000, 399999,  12000),
-    (400000, 499999,  15000),
-    (500000, 599999,  20000),
-    (600000, 699999,  24000),
-    (700000, 799999,  26999),
-    (800000, 899999,  30000),
-    (900000, 999999,  35000),
-    (1000000,1499999, 39999),
-    (1500000,1999999, 59999),
-    # >= 2,000,000 -> 4%
+    (35_000, 74_999, 1_000),
+    (75_000, 149_000, 2_500),
+    (150_000, 199_999, 6_000),
+    (200_000, 299_999, 7_999),
+    (300_000, 399_999, 12_000),
+    (400_000, 499_999, 15_000),
+    (500_000, 599_999, 20_000),
+    (600_000, 699_999, 24_000),
+    (700_000, 799_999, 26_999),
+    (800_000, 899_999, 30_000),
+    (900_000, 999_999, 35_000),
+    (1_000_000, 1_499_999, 39_999),
+    (1_500_000, 1_999_999, 59_999),
+    ("GE2M", None, 0.04),
 ]
 
-def montant_palier(d: float, table) -> int:
-    if d >= 2_000_000:
-        return int(round(d * 0.04))
+def reward_from_table(diamants: float, table) -> int:
+    if diamants < 35_000:
+        return 0
     for lo, hi, val in table:
-        if lo <= d <= hi:
+        if lo == "GE2M":
+            return int(round(diamants * 0.04))
+        if lo <= diamants <= hi:
             return int(val)
     return 0
 
-def bonus_debutant_montant(d: float) -> int:
-    if 75000 <= d <= 149999:
-        return 500
-    if 150000 <= d <= 499999:
-        return 1088
-    if 500000 <= d <= 2000000:
-        return 3000
-    return 0
+def debutant_bonus(row: pd.Series) -> tuple[str,int,str]:
+    """Retourne (etat 'Validé/Non validé', montant, palier_bonus_str).
+       Eligibilité : colonne AL indique 'débutant non diplômé 90j' (présence/texte), et bonus non encore utilisé."""
+    al = str(row.get("al","")).strip().lower()
+    elig = (al not in ["", "nan", "none", "0", "non", "false"])
+    if not elig or beginner_bonus_used(row):
+        return ("Non validé", 0, "")
 
-# =========================
-#     Créateurs
-# =========================
-def compute_creators_table(
-    df_raw: pd.DataFrame,
-    history_users_150k: Optional[Set[str]] = None,
-    prior_bonus_users: Optional[Set[str]] = None
-) -> pd.DataFrame:
-    roles = _colmap(df_raw)
-    c_diam, c_hours, c_days = roles["diamonds"], roles["hours"], roles["days"]
-    c_agent, c_mgr, c_user, c_al = roles["agent"], roles["manager"], roles["user"], roles["al"]
+    d = row["diamants"]
+    if 75_000 <= d <= 149_999:
+        return ("Validé", 500, "Bonus 1")
+    if 150_000 <= d <= 499_999:
+        return ("Validé", 1088, "Bonus 2")
+    if 500_000 <= d <= 2_000_000:
+        return ("Validé", 3000, "Bonus 3")
+    return ("Non validé", 0, "")
 
-    needed = [("Diamants", c_diam), ("Durée de live (heures)", c_hours), ("Jours de passage en live", c_days)]
-    missing = [name for name, col in needed if col is None]
-    if missing:
-        raise ValueError("Colonnes manquantes : " + ", ".join(missing))
+# ---------------- Tables de synthèse ----------------
 
-    df = df_raw.copy()
-    df_diam  = pd.to_numeric(df[c_diam], errors="coerce").fillna(0).astype(int)
-    df_hours = pd.to_numeric(df[c_hours], errors="coerce").fillna(0.0)
-    df_days  = pd.to_numeric(df[c_days],  errors="coerce").fillna(0.0)
+def compute_creators_table(df_in: pd.DataFrame) -> pd.DataFrame:
+    df = df_in.copy()
 
-    # User/Agent/Manager
-    user = df[c_user].astype(str) if c_user else pd.Series([""]*len(df))
-    agent = df[c_agent].astype(str) if c_agent else pd.Series([""]*len(df))
-    mgr   = df[c_mgr].astype(str)   if c_mgr   else pd.Series([""]*len(df))
+    # Actif ? (règle en fonction de 150k)
+    df["Actif"] = df.apply(is_active, axis=1).map({True:"Actif", False:"Inactif"})
 
-    # Débutant (AL flag, très tolérant)
-    if c_al:
-        al = df[c_al].astype(str).str.strip().str.lower()
-        is_debutant = al.isin({"1","true","vrai","oui","yes","y","o","débutant","debutant"})
-    else:
-        is_debutant = pd.Series([False]*len(df))
+    # Palier 2 ?
+    df["Palier 2"] = df.apply(palier2_valid, axis=1).map({True:"Validé", False:"Non validé"})
 
-    # Déjà 150k (à vie) via historique si fourni, sinon approximation (diamants du mois)
-    if history_users_150k is not None and c_user:
-        deja_150k = user.astype(str).str.strip().isin(history_users_150k)
-    else:
-        deja_150k = df_diam >= 150000
+    # Récompenses Palier 1 / 2 (montants)
+    df["_r1"] = df["diamants"].apply(lambda x: reward_from_table(x, P1))
+    df["_r2"] = df["diamants"].apply(lambda x: reward_from_table(x, P2))
 
-    # Seuils d'activité
-    req_days  = np.where(deja_150k | (~is_debutant), 12, 7)
-    req_hours = np.where(deja_150k | (~is_debutant), 25, 15)
-    actif = (df_diam >= 750) & (df_days >= req_days) & (df_hours >= req_hours)
+    # N’afficher que l’un des deux :
+    # - si Palier 2 validé => Palier 1 vide
+    # - sinon => Palier 2 vide
+    df["Récompense palier 1"] = np.where(df["Palier 2"]=="Validé", "", df["_r1"].astype("Int64"))
+    df["Récompense palier 2"] = np.where(df["Palier 2"]=="Validé", df["_r2"].astype("Int64"), "")
 
-    # Palier 2 (20j & 80h)
-    p2_ok = actif & (df_days >= 20) & (df_hours >= 80)
+    # Bonus débutant (une seule fois si bonus_used!=True)
+    bonus = df.apply(debutant_bonus, axis=1)
+    df["Bonus débutant"] = [b[0] for b in bonus]
+    df["_bonus_montant"] = [b[1] for b in bonus]
 
-    # Récompenses paliers (montants)
-    p1_amt = df_diam.apply(lambda x: montant_palier(x, P1)).astype(int)
-    p2_amt = df_diam.apply(lambda x: montant_palier(x, P2)).astype(int)
+    # Récompense totale = (palier choisi) + bonus
+    r_choisi = np.where(df["Palier 2"]=="Validé", df["_r2"], df["_r1"])
+    df["Récompense totale"] = (r_choisi + df["_bonus_montant"]).astype(int)
 
-    # Application visibilité P1/P2 : P2 remplace P1 s’il est validé
-    r_p1 = np.where(~p2_ok, p1_amt, 0).astype(int)
-    r_p2 = np.where(p2_ok,  p2_amt, 0).astype(int)
+    # Mise en forme numériques “propres”
+    for col in ["Récompense totale"]:
+        df[col] = df[col].astype(int)
 
-    # Bonus débutant (one-shot à vie, seulement si AL et actif)
-    bonus_now = np.array([bonus_debutant_montant(x) for x in df_diam], dtype=int)
-    # Autorisé seulement si "débutant" et actif
-    bonus_now = np.where(is_debutant & actif, bonus_now, 0)
-    # Bloquer si déjà perçu historiquement
-    if prior_bonus_users is not None and c_user:
-        already = user.astype(str).str.strip().isin(prior_bonus_users).values
-        bonus_now[already] = 0
+    # Colonnes de sortie (ordre)
+    out_cols = [
+        "user","manager","agent","diamants","heures","jours",
+        "Actif","Palier 2","Récompense palier 1","Récompense palier 2",
+        "Bonus débutant","Récompense totale"
+    ]
+    # sécurise les absents
+    out_cols = [c for c in out_cols if c in df.columns]
 
-    # Récompense totale
-    total = (r_p1 + r_p2 + bonus_now).astype(int)
+    # Tri décroissant sur diamants
+    df = df[out_cols].sort_values("diamants", ascending=False).reset_index(drop=True)
+    return df
 
-    out = pd.DataFrame({
-        "Nom d’utilisateur": user,
-        "Diamants": df_diam,
-        "Durée de live (heures)": df_hours.astype(int),
-        "Jours de passage en live": df_days.astype(int),
-        "Agent": agent,
-        "Groupe (Manager)": mgr,
-        "Créateur actif": np.where(actif, "Actif", "Inactif"),
-        "Palier 2": np.where(p2_ok, "Validé", "Non validé"),
-        "Récompense palier 1": r_p1,
-        "Récompense palier 2": r_p2,
-        "Bonus débutant": bonus_now,
-        "Récompense totale": total,
-        "Déjà 150k (historique)": np.where(deja_150k, "Oui", "Non"),
-    })
+def compute_agents_table(df_crea: pd.DataFrame) -> pd.DataFrame:
+    """Agrège par Agent :
+       - Diamants actifs (créateurs 'Actif')
+       - Diamants totaux
+       - Commission : 0 si <200k. 2% de 200k à 4M, puis 3% au-delà.
+       - Bonus agent : +1000 si bonus2 d’un créateur, +15000 si bonus3 d’un créateur (selon libellé sauvé par debutant_bonus)."""
+    df = df_crea.copy()
+    # tag actif bool
+    active_mask = df["Actif"].eq("Actif")
+    # diamants actifs & totaux
+    g = df.groupby("agent", dropna=False)
+    actifs = g.apply(lambda x: x.loc[active_mask.reindex(x.index, fill_value=False), "diamants"].sum()).rename("Diamants actifs")
+    totaux = g["diamants"].sum().rename("Diamants totaux")
 
-    # Masquer la colonne de palier non utilisée (affichage propre)
-    out.loc[out["Récompense palier 2"] > 0, "Récompense palier 1"] = ""
-    out.loc[out["Récompense palier 2"] == 0, "Récompense palier 2"] = ""
+    # commission
+    def com_calc(d_actifs):
+        if d_actifs < 200_000:
+            return 0
+        base = min(d_actifs, 4_000_000)
+        com = base * 0.02
+        if d_actifs > 4_000_000:
+            com += (d_actifs - 4_000_000) * 0.03
+        return int(round(com))
 
-    out = out.sort_values(["Récompense totale","Diamants"], ascending=[False, False]).reset_index(drop=True)
+    # bonus agent d’après le libellé du bonus (si tu veux strict: relire via diamants)
+    bonus_agent = g.apply(
+        lambda x: int((x["_bonus_montant"]==1088).sum())*1000 + int((x["_bonus_montant"]==3000).sum())*15000
+    ).rename("Bonus agent")
+
+    out = pd.concat([actifs, totaux, bonus_agent], axis=1).fillna(0)
+    out["Commission"] = out["Diamants actifs"].apply(com_calc)
+    out["Récompense totale agent"] = (out["Commission"] + out["Bonus agent"]).astype(int)
+
+    out = out.reset_index().rename(columns={"agent":"Agent"})
+    out = out.sort_values("Diamants actifs", ascending=False)
     return out
 
-# =========================
-#     Agrégations
-# =========================
-def _active_mask(df: pd.DataFrame) -> Tuple[pd.Series, Dict[str, Optional[str]]]:
-    roles = _colmap(df)
-    c_diam, c_hours, c_days = roles["diamonds"], roles["hours"], roles["days"]
-    if any(x is None for x in [c_diam, c_hours, c_days]):
-        raise ValueError("Colonnes minimales manquantes (diamants/heures/jours).")
-    d = pd.to_numeric(df[c_diam], errors="coerce").fillna(0)
-    h = pd.to_numeric(df[c_hours], errors="coerce").fillna(0.0)
-    j = pd.to_numeric(df[c_days],  errors="coerce").fillna(0.0)
-    deja_150k = d >= 150000
-    req_j = np.where(deja_150k, 12, 7)
-    req_h = np.where(deja_150k, 25, 15)
-    mask = (d >= 750) & (j >= req_j) & (h >= req_h)
-    return mask, roles
+def compute_managers_table(df_crea: pd.DataFrame) -> pd.DataFrame:
+    """Identique aux agents mais par Groupe/Manager.
+       Bonus manager : 5000 si un créateur déclenche Bonus 3 (3000 côté créateur)."""
+    df = df_crea.copy()
+    active_mask = df["Actif"].eq("Actif")
+    g = df.groupby("manager", dropna=False)
+    actifs = g.apply(lambda x: x.loc[active_mask.reindex(x.index, fill_value=False), "diamants"].sum()).rename("Diamants actifs")
+    totaux = g["diamants"].sum().rename("Diamants totaux")
 
-def _reward_pct(base: pd.Series) -> np.ndarray:
-    b = base.values.astype(float)
-    return np.where(
-        b <= 200000, 0,
-        np.where(b <= 4000000, b*0.02, 4000000*0.02 + (b-4000000)*0.03)
-    ).astype(int)
+    def com_calc(d_actifs):
+        if d_actifs < 200_000:
+            return 0
+        base = min(d_actifs, 4_000_000)
+        com = base * 0.02
+        if d_actifs > 4_000_000:
+            com += (d_actifs - 4_000_000) * 0.03
+        return int(round(com))
 
-def compute_agents_table(df_source: pd.DataFrame) -> pd.DataFrame:
-    mask, roles = _active_mask(df_source)
-    c_agent, c_diam = roles["agent"], roles["diamonds"]
-    if not c_agent:  # pas d'agent -> rien à agréger
-        return pd.DataFrame()
-    df = df_source.copy()
-    d = pd.to_numeric(df[c_diam], errors="coerce").fillna(0).astype(int)
-    df["Diamants_actifs"] = np.where(mask, d, 0)
-    df["Diamants_totaux"] = d
+    bonus_mgr = g.apply(lambda x: int((x["_bonus_montant"]==3000).sum())*5000).rename("Bonus manager")
 
-    agg = df.groupby(df[c_agent].astype(str), dropna=False).agg(
-        Creators_actifs  =("Diamants_actifs", lambda s: int((s>0).sum())),
-        Diamants_actifs  =("Diamants_actifs", "sum"),
-        Diamants_totaux  =("Diamants_totaux", "sum"),
-    ).reset_index().rename(columns={c_agent: "Agent"})
+    out = pd.concat([actifs, totaux, bonus_mgr], axis=1).fillna(0)
+    out["Commission"] = out["Diamants actifs"].apply(com_calc)
+    out["Récompense totale manager"] = (out["Commission"] + out["Bonus manager"]).astype(int)
 
-    agg["Récompense agent"] = _reward_pct(agg["Diamants_actifs"])
-    agg = agg.sort_values(["Diamants_actifs","Diamants_totaux"], ascending=[False, False]).reset_index(drop=True)
-    return agg
-
-def compute_managers_table(df_source: pd.DataFrame) -> pd.DataFrame:
-    mask, roles = _active_mask(df_source)
-    c_mgr, c_diam = roles["manager"], roles["diamonds"]
-    if not c_mgr:
-        return pd.DataFrame()
-    df = df_source.copy()
-    d = pd.to_numeric(df[c_diam], errors="coerce").fillna(0).astype(int)
-    df["Diamants_actifs"] = np.where(mask, d, 0)
-    df["Diamants_totaux"] = d
-
-    agg = df.groupby(df[c_mgr].astype(str), dropna=False).agg(
-        Creators_actifs  =("Diamants_actifs", lambda s: int((s>0).sum())),
-        Diamants_actifs  =("Diamants_actifs", "sum"),
-        Diamants_totaux  =("Diamants_totaux", "sum"),
-    ).reset_index().rename(columns={c_mgr: "Manager"})
-
-    agg["Récompense manager"] = _reward_pct(agg["Diamants_actifs"])
-    agg = agg.sort_values(["Diamants_actifs","Diamants_totaux"], ascending=[False, False]).reset_index(drop=True)
-    return agg
+    out = out.reset_index().rename(columns={"manager":"Manager"})
+    out = out.sort_values("Diamants actifs", ascending=False)
+    return out
