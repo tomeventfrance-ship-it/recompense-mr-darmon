@@ -224,3 +224,32 @@ def compute_creators_table(df_raw: pd.DataFrame) -> pd.DataFrame:
     df_out.loc[df_out["Récompense palier 2"] == 0, "Récompense palier 2"] = ""
 
     return df_out
+# -- Historique : qui a déjà reçu un bonus débutant --
+def extract_bonus_users(df: pd.DataFrame) -> set:
+    # détecte la colonne "Nom d’utilisateur" (ou équivalent déjà mappé par toi)
+    name_col = None
+    for c in df.columns:
+        cl = str(c).lower()
+        if "nom d’utilisateur" in cl or "nom d'utilisateur" in cl or "username" in cl or "user" in cl:
+            name_col = c; break
+    if not name_col:
+        return set()
+    # une ligne a un bonus si l’une des trois tranches a été octroyée
+    # (si tu as une colonne “Bonus débutant” texte/num, adapte ce test)
+    def _has_bonus(row):
+        for k in row.keys():
+            kl = str(k).lower()
+            if "bonus" in kl and "débutant" in kl:
+                try: return int(row[k]) > 0
+                except: 
+                    return str(row[k]).strip().lower() in {"validé","valide","true","1","oui"}
+        return False
+    mask = df.apply(_has_bonus, axis=1)
+    return set(df.loc[mask, name_col].astype(str).str.strip())
+
+def merge_bonus_history(*dfs: pd.DataFrame) -> set:
+    s = set()
+    for d in dfs:
+        s |= extract_bonus_users(d)
+    return s
+
