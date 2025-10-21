@@ -1,66 +1,76 @@
-import streamlit as st
+import io
 import pandas as pd
-from utils import compute_creators_table  # ta fonction de calcul principale
+import streamlit as st
 
-# Configuration de la page
-st.set_page_config(page_title="Récompenses - Créateurs", page_icon="💎", layout="wide")
-
-st.title("💎 Récompenses – Créateurs")
-st.write("Automatisation des récompenses pour les créateurs de contenu Tom Consulting & Event.")
-
-# Zone d'import du fichier
-uploaded = st.file_uploader("📂 Importez votre fichier (.xlsx ou .csv)", type=["xlsx", "csv"])
-
-if uploaded:
-    # Lecture du fichier complet
-    try:
-        if uploaded.name.lower().endswith(".csv"):
-            df_raw = pd.read_csv(uploaded)
-        else:
-            df_raw = pd.read_excel(uploaded)
-
-        st.success("✅ Fichier importé avec succès !")
-
-        # Application des calculs du tableau créateurs
-        df_result = compute_creators_table(df_raw)
-
-        # Aperçu visuel (les 10 premières lignes seulement)
-        st.subheader("Aperçu du tableau calculé (10 premières lignes)")
-        st.dataframe(df_result.head(10), use_container_width=True)
-
-        # Téléchargement du fichier complet
-        csv_bytes = df_result.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            label="⬇️ Télécharger le tableau complet (CSV)",
-            data=csv_bytes,
-            file_name="recompenses_createurs_complet.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
-
-    except Exception as e:
-        st.error(f"❌ Erreur lors du traitement du fichier : {e}")
-
-else:
-    st.info("👉 Importez votre fichier pour démarrer le calcul automatique.")
-uploaded = st.file_uploader(
-    "Importez vos fichiers (mois courant + anciens en option)", 
-    type=["xlsx","csv"], accept_multiple_files=True
+from utils import (
+    load_df, merge_history, compute_creators_table
 )
 
-if uploaded:
-    # charge tout
-    dfs = []
-    for f in uploaded:
-        df = load_df(f)  # ta fonction de lecture existante
-        dfs.append(df)
+st.set_page_config(page_title="Récompenses – Créateurs", layout="wide")
 
-    # s’il y a plusieurs fichiers, construit l’historique sur tous sauf le dernier
-    history_users = None
-    if len(dfs) >= 2:
-        history_users = merge_history(*dfs[:-1])
+st.title("💎 Récompenses – Créateurs")
+st.caption("Automatisation des récompenses pour les créateurs Tom Consulting & Event.")
 
-    current_df = dfs[-1]
+uploaded = st.file_uploader(
+    "Importez un ou plusieurs fichiers Excel/CSV (le **dernier** = mois courant ; les précédents = **historique** 150k)",
+    type=["xlsx", "csv"], accept_multiple_files=True
+)
+
+if not uploaded:
+    st.info("Importez un fichier pour démarrer.", icon="📥")
+    st.stop()
+
+# Charge tous les fichiers
+dfs = []
+for f in uploaded:
+    st.success(f"Fichier importé : **{f.name}**", icon="✅")
+    dfs.append(load_df(f))
+
+# Historique (tous sauf le dernier), mois courant = dernier
+history_users = None
+if len(dfs) >= 2:
+    history_users = merge_history(*dfs[:-1])
+
+current_df = dfs[-1]
+
+# Calcul
+try:
     table = compute_creators_table(current_df, history_users=history_users)
-    show_and_export(table)  # ton affichage + export
+except Exception as e:
+    st.error(f"Erreur du traitement : {e}")
+    st.stop()
 
+# Aperçu
+st.subheader("Aperçu")
+st.dataframe(table, use_container_width=True, height=600)
+
+# Exports
+@st.cache_data(show_spinner=False)
+def _to_csv_bytes(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False).encode("utf-8")
+
+@st.cache_data(show_spinner=False)
+def _to_xlsx_bytes(df: pd.DataFrame) -> bytes:
+    bio = io.BytesIO()
+    with pd.ExcelWriter(bio, engine="xlsxwriter") as xw:
+        df.to_excel(xw, index=False, sheet_name="Récompenses")
+    return bio.getvalue()
+
+c1, c2 = st.columns(2)
+with c1:
+    st.download_button(
+        "⬇️ Télécharger en CSV",
+        data=_to_csv_bytes(table),
+        file_name="Recompense_Creators.csv",
+        mime="text/csv",
+        type="primary"
+    )
+with c2:
+    st.download_button(
+        "⬇️ Télécharger en XLSX",
+        data=_to_xlsx_bytes(table),
+        file_name="Recompense_Creators.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+st.caption("Tri décroissant sur « Récompense totale ». Les montants sont en **diamants**.")
