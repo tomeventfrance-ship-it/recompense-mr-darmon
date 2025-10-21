@@ -1,24 +1,45 @@
-import streamlit as st, pandas as pd
-from utils import REQUIRED, prepare_creators, aggregate_managers
+import io
+import pandas as pd
+import streamlit as st
+from utils import load_df, compute_managers_table
 
 st.set_page_config(page_title="Récompenses – Managers", layout="wide")
-st.title("🏆 Récompenses – Managers")
+st.sidebar.title("app")  # idem
 
-up = st.file_uploader("📂 Importez votre fichier (.xlsx / .csv)", type=["xlsx","csv"], key="upload_managers")
+st.title("🏢 Récompenses – Managers")
 
-if not up:
-    st.info("Importez le même fichier export pour générer le tableau Managers.")
+uploaded = st.file_uploader(
+    "Importez le **même** fichier source (XLSX ou CSV)",
+    type=["xlsx","csv"], accept_multiple_files=False
+)
+
+if not uploaded:
+    st.info("Importez un fichier pour démarrer.", icon="📥")
     st.stop()
 
-df = pd.read_csv(up) if up.name.lower().endswith(".csv") else pd.read_excel(up)
-missing = [c for c in REQUIRED if c not in df.columns]
-if missing:
-    st.error(f"Colonnes manquantes : {missing}")
+df = load_df(uploaded)
+
+try:
+    table = compute_managers_table(df)
+except Exception as e:
+    st.error(f"Erreur du traitement : {e}")
     st.stop()
 
-crea = prepare_creators(df)
-man = aggregate_managers(crea)
-st.dataframe(man, use_container_width=True)
-st.download_button("⬇️ Télécharger (CSV)", man.to_csv(index=False, sep=";").encode("utf-8-sig"),
-                   file_name="Récompense_Managers.csv", mime="text/csv")
-st.caption("Tom Consulting & Event")
+st.dataframe(table, use_container_width=True, height=600)
+
+@st.cache_data
+def _csv(d): return d.to_csv(index=False).encode("utf-8")
+
+@st.cache_data
+def _xlsx(d):
+    bio = io.BytesIO()
+    with pd.ExcelWriter(bio, engine="xlsxwriter") as xw:
+        d.to_excel(xw, index=False, sheet_name="Managers")
+    return bio.getvalue()
+
+c1, c2 = st.columns(2)
+with c1:
+    st.download_button("⬇️ CSV Managers", data=_csv(table), file_name="Recompense_Managers.csv", mime="text/csv", type="primary")
+with c2:
+    st.download_button("⬇️ XLSX Managers", data=_xlsx(table), file_name="Recompense_Managers.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
