@@ -1,10 +1,10 @@
-# utils.py — Strict aux colonnes convenues + parseur heures + montant bonus
+# utils.py — colonnes strictes, parse heures, bonus débutant = Actif & AL
 
 import io, re
 import pandas as pd
 import numpy as np
 
-# --------- Noms exacts attendus ----------
+# --------- Noms attendus (10 colonnes) ----------
 EXPECTED = {
     "periode"   : "Période des données",
     "user"      : "Nom d'utilisateur du/de la créateur(trice)",
@@ -43,48 +43,36 @@ def _pick_strict(df: pd.DataFrame, key: str) -> str:
         if alt in m: return m[alt]
     raise ValueError(f"Colonne manquante: « {exact} »")
 
-# --------- conversion "Durée de live" vers heures (int) ----------
+# --------- parse "Durée de LIVE" -> heures (entier) ----------
 def _parse_hours_series(s: pd.Series) -> pd.Series:
     def _one(x):
         if pd.isna(x): return 0.0
-        # déjà numérique
-        if isinstance(x,(int,float,np.integer,np.floating)): 
+        if isinstance(x,(int,float,np.integer,np.floating)):
             return float(x)
         t = str(x).strip()
         if t == "": return 0.0
-        # virgule décimale
         if re.fullmatch(r"\d+,\d+", t):
             return float(t.replace(",", "."))
-        # HH:MM[:SS]
         if ":" in t:
-            parts = [p for p in re.split(r":", t) if p!=""]
+            parts = [p for p in t.split(":")]
             try:
                 h = float(parts[0]); m = float(parts[1]) if len(parts)>1 else 0.0
                 s = float(parts[2]) if len(parts)>2 else 0.0
                 return h + m/60.0 + s/3600.0
-            except: 
+            except:
                 pass
-        # “12 h 30”, “12h30”, “1h”, “90 min”
         m = re.findall(r"(\d+(?:[.,]\d+)?)\s*(h|heures|hour|hrs|min|m)", t.lower())
         if m:
-            total = 0.0; last_unit = None
+            total = 0.0
             for val, unit in m:
                 v = float(val.replace(",", "."))
-                if unit.startswith("h"):
-                    total += v
-                    last_unit = "h"
-                else:
-                    total += v/60.0
-                    last_unit = "m"
+                total += v if unit.startswith("h") else v/60.0
             return total
-        # nombre texte “12.5”
         try:
             return float(t.replace(",", "."))
         except:
             return 0.0
-    out = s.apply(_one).fillna(0.0)
-    # on tronque à l’entier (comme demandé)
-    return out.astype(float).apply(lambda v: int(v))
+    return s.apply(_one).fillna(0.0).astype(float).apply(lambda v: int(v))
 
 def _standardize(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -102,13 +90,12 @@ def _standardize(df: pd.DataFrame) -> pd.DataFrame:
         cols["al"]      : "AL",
     })
 
-    # Types
     out["Diamants"] = pd.to_numeric(out["Diamants"], errors="coerce").fillna(0).astype(int)
     out["Jours de passage en live"] = pd.to_numeric(out["Jours de passage en live"], errors="coerce").fillna(0).astype(int)
     out["Durée de live (heures)"] = _parse_hours_series(out["Durée de live (heures)"])
     for n in ["Nom d’utilisateur","Groupe/Manager","Agent","AL","Période des données","Date relation"]:
         out[n] = out[n].astype(str).fillna("").str.strip()
-    out["Nom d’utilisateur"] = out["Nom d’utilisateur"].replace({"":"(non fourni)"})
+    out["Nom d’utilisateur"] = out["Nom d’utilisateur"].replace({"": "(non fourni)"})
     return out
 
 def load_df(file_like) -> pd.DataFrame:
@@ -129,7 +116,7 @@ def load_df(file_like) -> pd.DataFrame:
             raw = pd.read_excel(file_like)
     return _standardize(raw)
 
-# --------- Barèmes ----------
+# --------- Barèmes paliers ----------
 def palier1_reward(d:int)->int:
     if d>=2_000_000: return round(d*0.04)
     table=[(35_000,74_999,1_000),(75_000,149_000,2_500),(150_000,199_999,5_000),
@@ -152,17 +139,29 @@ def palier2_reward(d:int)->int:
         if a<=d<=b: return v
     return 0
 
+# --------- Bonus débutant (1/2/3) = Actif & AL ----------
 def _al_ok(x)->bool:
-    return _norm_text(x) in {"al","debutant non diplome 90j","debutant non diplome 90 j","debutant","debutant 90j"}
+    t = _norm_text(x)
+    return t in {
+        "al","debutant non diplome 90j","debutant non diplome 90 j",
+        "debutant","debutant 90j","debutant 90 j"
+    }
 
-def debutant_bonus_numpy(diamants: pd.Series, al: pd.Series):
+def debutant_bonus(diamants: pd.Series, al: pd.Series, actif: pd.Series):
     d = diamants.to_numpy()
     alv = np.vectorize(_al_ok)(al.to_numpy())
+    act = actif.to_numpy()
+
     b = np.zeros(d.shape[0], dtype=int)
-    b[(alv) & ( (d>=75_000) & (d<=149_999) )]    =  500
-    b[(alv) & ( (d>=150_000) & (d<=499_999) )]   = 1088
-    b[(alv) & ( (d>=500_000) & (d<=2_000_000) )] = 3000
-    return pd.Series(b, index=diamants.index, dtype=int), pd.Series(np.where(b>0,"Validé","Non validé"), index=diamants.index)
+    # Bonus 1 : 75k–149 999 => 500
+    b[(act) & (alv) & ((d>=75_000) & (d<=149_999))]    =  500
+    # Bonus 2 : 150k–499 999 => 1088
+    b[(act) & (alv) & ((d>=150_000) & (d<=499_999))]   = 1088
+    # Bonus 3 : 500k–2 000 000 => 3000
+    b[(act) & (alv) & ((d>=500_000) & (d<=2_000_000))] = 3000
+
+    flag = np.where(b>0, "Validé", "Non validé")
+    return pd.Series(b, index=diamants.index, dtype=int), pd.Series(flag, index=diamants.index)
 
 # --------- Tables ----------
 def compute_creators_table(df: pd.DataFrame) -> pd.DataFrame:
@@ -174,7 +173,7 @@ def compute_creators_table(df: pd.DataFrame) -> pd.DataFrame:
     aff_p1 = np.where(pal2.to_numpy(), 0, r1).astype(int)
     aff_p2 = np.where(pal2.to_numpy(), r2, 0).astype(int)
 
-    bonus_vals, bonus_flags = debutant_bonus_numpy(df["Diamants"], df["AL"])
+    bonus_vals, bonus_flags = debutant_bonus(df["Diamants"], df["AL"], actif)
     total = (aff_p1 + aff_p2 + bonus_vals.to_numpy()).astype(int)
 
     out = pd.DataFrame({
@@ -189,7 +188,7 @@ def compute_creators_table(df: pd.DataFrame) -> pd.DataFrame:
         "Récompense palier 1": aff_p1,
         "Récompense palier 2": aff_p2,
         "Bonus débutant": bonus_flags.values,
-        "Montant bonus": bonus_vals.values,          # <<< ajouté
+        "Montant bonus": bonus_vals.values,
         "Récompense totale": total,
     }).sort_values(by=["Diamants","Récompense totale"], ascending=[False,False]).reset_index(drop=True)
 
