@@ -1,4 +1,20 @@
 # app.py
+uploaded = st.file_uploader("Importez un ou plusieurs fichiers (le dernier = mois courant)", type=["xlsx","csv"], accept_multiple_files=True)
+if not uploaded: st.stop()
+
+dfs = []
+for f in uploaded:
+    df = pd.read_csv(f) if f.name.lower().endswith(".csv") else pd.read_excel(f)
+    dfs.append(df)
+
+from utils import merge_bonus_history, compute_creators_table
+prior_bonus = merge_bonus_history(*dfs[:-1]) if len(dfs) >= 2 else None
+current = dfs[-1]
+
+table = compute_creators_table(current, prior_bonus_users=prior_bonus)
+st.dataframe(table, use_container_width=True)
+st.download_button("⬇️ CSV", table.to_csv(index=False).encode("utf-8-sig"), "Recompense_Creators.csv", "text/csv")
+
 import io
 import pandas as pd
 import streamlit as st
@@ -40,3 +56,4 @@ if uploaded:
         st.error(f"Erreur lors du traitement du fichier : {e}")
 else:
     st.info("Importez un fichier pour démarrer.")
+
