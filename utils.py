@@ -129,3 +129,45 @@ def aggregate_managers(crea: pd.DataFrame) -> pd.DataFrame:
     out["Bonus_manager"]=(out["Bonus3_count"]*5000).astype(int)
     out["Récompense_finale"]=np.where(out["Diamants_actifs"]>=200_000,out["Récompense_%"]+out["Bonus_manager"],0).astype(int)
     return out.sort_values(["Diamants_actifs","Diamants_totaux"],ascending=False)
+import pandas as pd
+
+def compute_creators_table(df_source: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calcule les récompenses créateurs avec les paliers, bonus et totaux.
+    """
+
+    df = df_source.copy()
+
+    # Vérification des colonnes minimales
+    required_cols = ["Nombre de live", "Durée totale (heures)", "Diamants générés"]
+    for col in required_cols:
+        if col not in df.columns:
+            raise ValueError(f"Colonne manquante dans le fichier importé : '{col}'")
+
+    # Palier 1
+    df["Palier 1 atteint"] = df["Diamants générés"] >= 50000
+
+    # Palier 2
+    df["Palier 2 atteint"] = df["Diamants générés"] >= 150000
+
+    # Récompense de base selon le palier
+    df["Récompense (base)"] = 0
+    df.loc[df["Palier 1 atteint"], "Récompense (base)"] = 1000
+    df.loc[df["Palier 2 atteint"], "Récompense (base)"] = 3000
+
+    # Bonus si plus de 10 lives
+    df["Bonus Live"] = 0
+    df.loc[df["Nombre de live"] >= 10, "Bonus Live"] = 500
+
+    # Bonus durée totale
+    df["Bonus Temps"] = 0
+    df.loc[df["Durée totale (heures)"] >= 20, "Bonus Temps"] = 500
+
+    # Total final
+    df["Total Récompense"] = df["Récompense (base)"] + df["Bonus Live"] + df["Bonus Temps"]
+
+    # Statut
+    df["Statut"] = df["Total Récompense"].apply(lambda x: "Validé" if x > 0 else "Non validé")
+
+    return df
+
