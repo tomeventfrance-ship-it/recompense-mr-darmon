@@ -1,24 +1,45 @@
-import streamlit as st, pandas as pd
-from utils import REQUIRED, prepare_creators, aggregate_agents
+import io
+import pandas as pd
+import streamlit as st
+from utils import load_df, compute_agents_table
 
 st.set_page_config(page_title="Récompenses – Agents", layout="wide")
-st.title("👔 Récompenses – Agents")
 
-up = st.file_uploader("📂 Importez votre fichier (.xlsx / .csv)", type=["xlsx","csv"], key="upload_agents")
+st.sidebar.title("app")  # ne pas modifier, évite le bug de label streamlit
+st.title("👥 Récompenses – Agents")
 
-if not up:
-    st.info("Importez le même fichier export pour générer le tableau Agents.")
+uploaded = st.file_uploader(
+    "Importez le **même** fichier source (XLSX ou CSV)",
+    type=["xlsx","csv"], accept_multiple_files=False
+)
+
+if not uploaded:
+    st.info("Importez un fichier pour démarrer.", icon="📥")
     st.stop()
 
-df = pd.read_csv(up) if up.name.lower().endswith(".csv") else pd.read_excel(up)
-missing = [c for c in REQUIRED if c not in df.columns]
-if missing:
-    st.error(f"Colonnes manquantes : {missing}")
+df = load_df(uploaded)
+
+try:
+    table = compute_agents_table(df)
+except Exception as e:
+    st.error(f"Erreur du traitement : {e}")
     st.stop()
 
-crea = prepare_creators(df)
-agents = aggregate_agents(crea)
-st.dataframe(agents, use_container_width=True)
-st.download_button("⬇️ Télécharger (CSV)", agents.to_csv(index=False, sep=";").encode("utf-8-sig"),
-                   file_name="Récompense_Agents.csv", mime="text/csv")
-st.caption("Tom Consulting & Event")
+st.dataframe(table, use_container_width=True, height=600)
+
+@st.cache_data
+def _csv(d): return d.to_csv(index=False).encode("utf-8")
+
+@st.cache_data
+def _xlsx(d):
+    bio = io.BytesIO()
+    with pd.ExcelWriter(bio, engine="xlsxwriter") as xw:
+        d.to_excel(xw, index=False, sheet_name="Agents")
+    return bio.getvalue()
+
+c1, c2 = st.columns(2)
+with c1:
+    st.download_button("⬇️ CSV Agents", data=_csv(table), file_name="Recompense_Agents.csv", mime="text/csv", type="primary")
+with c2:
+    st.download_button("⬇️ XLSX Agents", data=_xlsx(table), file_name="Recompense_Agents.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
