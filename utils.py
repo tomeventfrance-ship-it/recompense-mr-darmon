@@ -1,101 +1,107 @@
-# utils.py — version robuste (aucun .str utilisé)
+# utils.py — utilise EXCLUSIVEMENT les colonnes spécifiées par Tom
 
 import io, re
 import pandas as pd
 import numpy as np
 
-# ---------- Helpers ----------
-def _norm(s) -> str:
+# --------- noms exacts attendus (avec accents) ----------
+EXPECTED = {
+    "periode"   : "Période des données",
+    "user"      : "Nom d'utilisateur du/de la créateur(trice)",
+    "manager"   : "Groupe",
+    "agent"     : "Agent",
+    "relation"  : "Date d'établissement de la relation",
+    "diamants"  : "Diamants",
+    "heures"    : "Durée de LIVE",
+    "jours"     : "Jours de passage en LIVE valides",
+    "al"        : "Statut du diplôme",
+}
+
+# Petit normaliseur robuste (si un export change légèrement l’en-tête)
+def _norm(s: str) -> str:
     s = str(s)
     s = s.encode("ascii","ignore").decode().lower()
     s = re.sub(r"[^a-z0-9 ]+"," ",s)
     return re.sub(r"\s+"," ",s).strip()
 
-CANDIDATES = {
-    "diamants":  ["Diamants","Total diamants","Nombre de diamants","Diamonds"],
-    "heures":    ["Durée de live (heures)","Durée de live","Heures de live","Temps de live (h)"],
-    "jours":     ["Jours de passage en live","Jours de live","Nombre de jours de live"],
-    "agent":     ["Agent","Agent (col.E)","Agent(e)"],
-    "manager":   ["Groupe/Manager","Manager","Groupe","Groupe (col.D)"],
-    "user":      ["Nom d’utilisateur","Nom d'utilisateur","Username","Utilisateur","Pseudo"],
-    "al":        ["AL","Débutant non diplômé 90j","Debutant non diplome 90j"],
-    "deja150":   ["déjà 150k","deja 150k","a deja fait 150k"],
-    "bonus_used":["bonus_deja_utilise","bonus déjà utilisé","bonus utilise","bonus_used"]
+# correspondances de secours -> en-têtes EXACTS ci-dessus
+BACKUPS = {
+    "periode":   {"periode des donnees","periode"},
+    "user":      {"nom d utilisateur du de la createur trice","nom d utilisateur","username"},
+    "manager":   {"groupe","manager"},
+    "agent":     {"agent","agent e"},
+    "relation":  {"date d etablissement de la relation","date relation"},
+    "diamants":  {"diamants","diamonds"},
+    "heures":    {"duree de live","duree live","heures de live","temps de live h","duree de live heures"},
+    "jours":     {"jours de passage en live valides","jours de live","nb jours live"},
+    "al":        {"statut du diplome","al","debutant non diplome 90j"},
 }
-CANON = ["user","manager","agent","diamants","heures","jours","al","deja150","bonus_used"]
 
-def _pick(df: pd.DataFrame, keys) -> str|None:
-    norm = {_norm(c): c for c in map(str, df.columns)}
-    for k in keys:
-        n=_norm(k)
-        if n in norm: return norm[n]
-    for k in keys:
-        nk=_norm(k)
-        for c in df.columns:
-            if nk in _norm(c): return c
-    return None
+# ---------- Lecture & standardisation (ne garde QUE les colonnes ci-dessus) ----------
+def _pick_strict(df: pd.DataFrame, key: str) -> str:
+    exact = EXPECTED[key]
+    if exact in df.columns: return exact
+    # fallback souple si l’export renomme légèrement
+    want = BACKUPS.get(key, set())
+    m = {_norm(c): c for c in map(str, df.columns)}
+    for w in want:
+        if w in m: return m[w]
+    raise ValueError(f"Colonne manquante: « {exact} »")
 
-def _to_clean_text(s):
-    if pd.isna(s): return ""
-    v = str(s)
-    return v.strip()
+def _standardize(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = list(map(str, df.columns))
+    df = df.reset_index(drop=True)
 
-# ---------- Lecture + mapping ----------
-def _standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    raw = df.copy()
-    raw.columns = list(map(str, raw.columns))
+    # Sélection stricte des seules colonnes requises
+    cols = {k: _pick_strict(df, k) for k in EXPECTED.keys()}
+    out = df[[cols[k] for k in EXPECTED.keys()]].rename(columns={
+        cols["periode"] : "Période des données",
+        cols["user"]    : "Nom d’utilisateur",
+        cols["manager"] : "Groupe/Manager",
+        cols["agent"]   : "Agent",
+        cols["relation"]: "Date relation",
+        cols["diamants"]: "Diamants",
+        cols["heures"]  : "Durée de live (heures)",
+        cols["jours"]   : "Jours de passage en live",
+        cols["al"]      : "AL",
+    })
 
-    found={}
-    for canon,cand in CANDIDATES.items():
-        col=_pick(raw,cand)
-        if col is not None: found[canon]=col
+    # Types
+    for n in ["Diamants","Durée de live (heures)","Jours de passage en live"]:
+        out[n] = pd.to_numeric(out[n], errors="coerce").fillna(0).astype(int)
+    for n in ["Nom d’utilisateur","Groupe/Manager","Agent","AL","Période des données","Date relation"]:
+        out[n] = out[n].astype(str).fillna("").str.strip()
 
-    missing_core=[k for k in ["diamants","heures","jours"] if k not in found]
-    if missing_core:
-        pretty={"diamants":"Diamants","heures":"Durée de live (heures)","jours":"Jours de passage en live"}
-        raise ValueError("Colonnes manquantes: "+", ".join(pretty[k] for k in missing_core))
+    # Drapeaux vides propres
+    out["Nom d’utilisateur"] = out["Nom d’utilisateur"].replace({"":"(non fourni)"})
 
-    use_cols=[found[k] for k in CANON if k in found]
-    df = raw.loc[:, use_cols].rename(columns={found[k]:k for k in found})
-
-    for opt in CANON:
-        if opt not in df.columns: df[opt]=""
-
-    for num in ["diamants","heures","jours"]:
-        df[num] = pd.to_numeric(df[num], errors="coerce").fillna(0).astype(int)
-
-    for s in ["user","agent","manager","al","deja150","bonus_used"]:
-        df[s] = df[s].map(_to_clean_text)
-
-    return df[CANON]
+    return out
 
 def load_df(file_like) -> pd.DataFrame:
-    # Accepte DataFrame, fichier binaire, BytesIO, CSV, XLSX
+    # accepte DataFrame, Bytes, fichiers streamlit
     if isinstance(file_like, pd.DataFrame):
-        return _standardize_columns(file_like)
-
+        return _standardize(file_like)
     name = getattr(file_like, "name", "")
     if isinstance(file_like, (bytes, bytearray)):
         bio = io.BytesIO(file_like); bio.name = name or ""
         file_like = bio
 
-    fname = str(name).lower()
-    if fname.endswith(".csv"):
+    fn = str(name).lower()
+    if fn.endswith(".csv"):
         raw = pd.read_csv(file_like)
-    elif fname.endswith(".xls") or fname.endswith(".xlsx"):
+    elif fn.endswith((".xls",".xlsx")):
         raw = pd.read_excel(file_like)
     else:
-        # tente CSV par défaut
         try:
             raw = pd.read_csv(file_like)
         except Exception:
             file_like.seek(0) if hasattr(file_like,"seek") else None
             raw = pd.read_excel(file_like)
+    return _standardize(raw)
 
-    return _standardize_columns(raw)
-
-# ---------- Barèmes ----------
-def palier1_reward(d):
+# ---------- Barèmes & règles ----------
+def palier1_reward(d:int)->int:
     if d>=2_000_000: return round(d*0.04)
     table=[(35_000,74_999,1_000),(75_000,149_000,2_500),(150_000,199_999,5_000),
            (200_000,299_999,6_000),(300_000,399_999,7_999),(400_000,499_999,12_000),
@@ -106,7 +112,7 @@ def palier1_reward(d):
         if a<=d<=b: return v
     return 0
 
-def palier2_reward(d):
+def palier2_reward(d:int)->int:
     if d>=2_000_000: return round(d*0.04)
     table=[(35_000,74_999,1_000),(75_000,149_000,2_500),(150_000,199_999,6_000),
            (200_000,299_999,7_999),(300_000,399_999,12_000),(400_000,499_999,15_000),
@@ -117,51 +123,51 @@ def palier2_reward(d):
         if a<=d<=b: return v
     return 0
 
-def _is_true(s:str)->bool:
-    return _norm(s) in {"1","true","vrai","oui","yes","used"}
+def _norm(s):  # réutilisé pour AL/flags
+    s = str(s)
+    s = s.encode("ascii","ignore").decode().lower()
+    s = re.sub(r"[^a-z0-9 ]+"," ",s)
+    return re.sub(r"\s+"," ",s).strip()
 
-def debutant_bonus_series(diamants:pd.Series, al:pd.Series, bonus_used:pd.Series):
-    al_ok   = al.map(lambda x: _norm(x) in {"al","debutant non diplome 90j","debutant non diplome 90 j","debutant"})
-    not_used= ~bonus_used.map(_is_true)
-    elig = (al_ok & not_used).astype(bool)
-
-    b = np.zeros(len(diamants), dtype=int)
-    b = np.where(elig & (diamants.between(75_000,149_999)),  500, b)
-    b = np.where(elig & (diamants.between(150_000,499_999)),1088, b)
-    b = np.where(elig & (diamants.between(500_000,2_000_000)),3000, b)
-    bonus_vals = pd.Series(b, index=diamants.index, dtype=int)
-    bonus_flag = pd.Series(np.where(bonus_vals>0,"Validé","Non validé"), index=diamants.index)
-    return bonus_vals, bonus_flag
+def debutant_bonus_numpy(diamants: pd.Series, al: pd.Series):
+    d = diamants.to_numpy()
+    al_ok = np.vectorize(lambda x: _norm(x) in {
+        "al","debutant non diplome 90j","debutant non diplome 90 j","debutant","debutant 90j"
+    })(al.to_numpy())
+    b = np.zeros(d.shape[0], dtype=int)
+    b[(al_ok) & ( (d>=75_000) & (d<=149_999) )]    =  500
+    b[(al_ok) & ( (d>=150_000) & (d<=499_999) )]   = 1088
+    b[(al_ok) & ( (d>=500_000) & (d<=2_000_000) )] = 3000
+    return pd.Series(b, index=diamants.index, dtype=int), pd.Series(np.where(b>0,"Validé","Non validé"), index=diamants.index)
 
 # ---------- Créateurs ----------
 def compute_creators_table(df: pd.DataFrame) -> pd.DataFrame:
-    idx = df.index
-    actif  = ((df["jours"]>=12) & (df["heures"]>=25)) | (df["diamants"]>=150_000)
-    pal2   = (df["jours"]>=20) & (df["heures"]>=80)
+    # conditions d’activité & palier 2
+    actif = ((df["Jours de passage en live"]>=12) & (df["Durée de live (heures)"]>=25)) | (df["Diamants"]>=150_000)
+    pal2  = (df["Jours de passage en live"]>=20) & (df["Durée de live (heures)"]>=80)
 
-    r1 = df["diamants"].apply(palier1_reward).astype(int)
-    r2 = df["diamants"].apply(palier2_reward).astype(int)
+    r1 = df["Diamants"].apply(palier1_reward).astype(int).to_numpy()
+    r2 = df["Diamants"].apply(palier2_reward).astype(int).to_numpy()
+    aff_p1 = np.where(pal2.to_numpy(), 0, r1).astype(int)  # n’affiche pas P1 si P2 validé
+    aff_p2 = np.where(pal2.to_numpy(), r2, 0).astype(int)
 
-    aff_p1 = pd.Series(np.where(pal2, 0, r1), index=idx, dtype=int)
-    aff_p2 = pd.Series(np.where(pal2, r2, 0), index=idx, dtype=int)
-
-    bonus_vals, bonus_flags = debutant_bonus_series(df["diamants"], df["al"], df["bonus_used"])
-    total = (aff_p1 + aff_p2 + bonus_vals).astype(int)
+    bonus_vals, bonus_flags = debutant_bonus_numpy(df["Diamants"], df["AL"])
+    total = (aff_p1 + aff_p2 + bonus_vals.to_numpy()).astype(int)
 
     out = pd.DataFrame({
-        "Nom d’utilisateur": df["user"].replace({"":"(non fourni)"}),
-        "Groupe/Manager": df["manager"],
-        "Agent": df["agent"],
-        "Diamants": df["diamants"].astype(int),
-        "Durée de live (heures)": df["heures"].astype(int),
-        "Jours de passage en live": df["jours"].astype(int),
+        "Nom d’utilisateur": df["Nom d’utilisateur"],
+        "Groupe/Manager": df["Groupe/Manager"],
+        "Agent": df["Agent"],
+        "Diamants": df["Diamants"].astype(int),
+        "Durée de live (heures)": df["Durée de live (heures)"].astype(int),
+        "Jours de passage en live": df["Jours de passage en live"].astype(int),
         "Actif": np.where(actif,"Validé","Non validé"),
         "Palier 2": np.where(pal2,"Validé","Non validé"),
-        "Récompense palier 1": aff_p1.values,
-        "Récompense palier 2": aff_p2.values,
+        "Récompense palier 1": aff_p1,
+        "Récompense palier 2": aff_p2,
         "Bonus débutant": bonus_flags.values,
-        "Récompense totale": total.values,
-    }, index=idx).sort_values(by=["Diamants","Récompense totale"], ascending=[False,False]).reset_index(drop=True)
+        "Récompense totale": total,
+    }).sort_values(by=["Diamants","Récompense totale"], ascending=[False,False]).reset_index(drop=True)
 
     return out
 
@@ -172,37 +178,37 @@ def _agent_reward(sum_active:int)->int:
     return round(sum_active*0.03)
 
 def compute_agents_table(df: pd.DataFrame) -> pd.DataFrame:
-    actif = ((df["jours"]>=12) & (df["heures"]>=25)) | (df["diamants"]>=150_000)
-    g = df.groupby("agent", dropna=False)
-    total  = g["diamants"].sum().astype(int)
-    actifs = df.loc[actif].groupby("agent", dropna=False)["diamants"].sum().reindex(total.index).fillna(0).astype(int)
-    reward = actifs.apply(_agent_reward).astype(int)
-    perte  = (total - actifs).astype(int)
+    actif = ((df["Jours de passage en live"]>=12) & (df["Durée de live (heures)"]>=25)) | (df["Diamants"]>=150_000)
+    g = df.groupby("Agent", dropna=False)
+    tot   = g["Diamants"].sum().astype(int)
+    act   = df.loc[actif].groupby("Agent", dropna=False)["Diamants"].sum().reindex(tot.index).fillna(0).astype(int)
+    perte = (tot - act).astype(int)
+    rew   = act.apply(_agent_reward).astype(int)
 
     return pd.DataFrame({
-        "Agent": total.index.where(total.index!="", "(non défini)"),
-        "Diamants actifs": actifs.values,
-        "Diamants totaux": total.values,
+        "Agent": tot.index.where(tot.index!="","(non défini)"),
+        "Diamants actifs": act.values,
+        "Diamants totaux": tot.values,
         "Perte (diamants inactifs)": perte.values,
-        "Récompense agent": reward.values
+        "Récompense agent": rew.values
     }).sort_values(by=["Diamants actifs","Diamants totaux"], ascending=False).reset_index(drop=True)
 
 # ---------- Managers ----------
 def compute_managers_table(df: pd.DataFrame) -> pd.DataFrame:
-    actif = ((df["jours"]>=12) & (df["heures"]>=25)) | (df["diamants"]>=150_000)
-    pal3  = df["diamants"]>=500_000
+    actif = ((df["Jours de passage en live"]>=12) & (df["Durée de live (heures)"]>=25)) | (df["Diamants"]>=150_000)
+    pal3  = df["Diamants"]>=500_000
 
-    g = df.groupby("manager", dropna=False)
-    total  = g["diamants"].sum().astype(int)
-    actifs = df.loc[actif].groupby("manager", dropna=False)["diamants"].sum().reindex(total.index).fillna(0).astype(int)
-    base   = actifs.apply(_agent_reward).astype(int)
-    b3     = df.loc[pal3].groupby("manager", dropna=False)["diamants"].count().reindex(total.index).fillna(0).astype(int)*5000
-    perte  = (total - actifs).astype(int)
+    g = df.groupby("Groupe/Manager", dropna=False)
+    tot   = g["Diamants"].sum().astype(int)
+    act   = df.loc[actif].groupby("Groupe/Manager", dropna=False)["Diamants"].sum().reindex(tot.index).fillna(0).astype(int)
+    base  = act.apply(_agent_reward).astype(int)
+    b3    = df.loc[pal3].groupby("Groupe/Manager", dropna=False)["Diamants"].count().reindex(tot.index).fillna(0).astype(int)*5000
+    perte = (tot - act).astype(int)
 
     return pd.DataFrame({
-        "Manager/Groupe": total.index.where(total.index!="","(non défini)"),
-        "Diamants actifs": actifs.values,
-        "Diamants totaux": total.values,
+        "Manager/Groupe": tot.index.where(tot.index!="","(non défini)"),
+        "Diamants actifs": act.values,
+        "Diamants totaux": tot.values,
         "Perte (diamants inactifs)": perte.values,
         "Bonus 3 (5000 x nb créateurs ≥500k)": b3.values,
         "Récompense manager (hors bonus)": base.values,
