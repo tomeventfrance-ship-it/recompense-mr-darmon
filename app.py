@@ -43,3 +43,24 @@ if uploaded:
 
 else:
     st.info("👉 Importez votre fichier pour démarrer le calcul automatique.")
+uploaded = st.file_uploader(
+    "Importez vos fichiers (mois courant + anciens en option)", 
+    type=["xlsx","csv"], accept_multiple_files=True
+)
+
+if uploaded:
+    # charge tout
+    dfs = []
+    for f in uploaded:
+        df = load_df(f)  # ta fonction de lecture existante
+        dfs.append(df)
+
+    # s’il y a plusieurs fichiers, construit l’historique sur tous sauf le dernier
+    history_users = None
+    if len(dfs) >= 2:
+        history_users = merge_history(*dfs[:-1])
+
+    current_df = dfs[-1]
+    table = compute_creators_table(current_df, history_users=history_users)
+    show_and_export(table)  # ton affichage + export
+
