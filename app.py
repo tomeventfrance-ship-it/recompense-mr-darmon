@@ -11,11 +11,11 @@ import pandas as pd
 import streamlit as st
 
 from utils import (
-    load_df,                           # charge + mappe les colonnes
-    compute_creators_table,            # calcule le tableau créateurs (paliers + bonus débutant)
-    compute_agents_table_from_creators,# calcule le tableau agents à partir du résultat créateurs
-    compute_managers_table_from_creators, # calcule le tableau managers à partir du résultat créateurs
-    CANON                              # dictionnaire des noms canoniques (info)
+    load_df,
+    compute_creators_table,
+    compute_agents_table_from_creators,
+    compute_managers_table_from_creators,
+    CANON
 )
 
 # -----------------------------
@@ -39,24 +39,23 @@ st.caption(
 # -----------------------------
 st.subheader("Importez votre/vos fichier(s) (.xlsx / .csv)")
 uploaded_files = st.file_uploader(
-    "Drag and drop files here",
+    "Glissez et déposez ici",
     type=["xlsx", "csv"],
     accept_multiple_files=True
 )
 
-# Mémoire de session pour garder le dernier lot importé pendant la navigation
 if "last_files_payload" not in st.session_state:
     st.session_state.last_files_payload = None
 
 use_last = False
-col_btn1, col_btn2 = st.columns([1,1])
-with col_btn1:
+c1, c2 = st.columns([1, 1])
+with c1:
     if st.button("🧠 Utiliser les fichiers mémorisés (si dispo)"):
         if st.session_state.last_files_payload is not None:
             use_last = True
         else:
             st.info("Aucun jeu de fichiers mémorisé dans cette session.")
-with col_btn2:
+with c2:
     if st.button("🗑️ Vider les fichiers de la session"):
         st.session_state.last_files_payload = None
         st.success("Mémoire de fichiers vidée.")
@@ -68,7 +67,6 @@ def _concat_loaded(list_dfs: list[pd.DataFrame]) -> pd.DataFrame:
     if not list_dfs:
         return pd.DataFrame()
     df = pd.concat(list_dfs, ignore_index=True)
-    # Sécurité : vire exacts doublons de lignes brutes
     df = df.drop_duplicates()
     return df
 
@@ -76,18 +74,18 @@ df_raw = pd.DataFrame()
 
 try:
     if uploaded_files and len(uploaded_files) > 0:
-        # Lire tous les fichiers importés
         loaded = []
         for f in uploaded_files:
-            loaded.append(load_df(f))   # utils.load_df gère csv/xlsx + mapping colonnes
+            # ✅ Correction ici : on lit les bytes
+            data = f.read()
+            bio = io.BytesIO(data)
+            df = load_df(bio)
+            loaded.append(df)
         df_raw = _concat_loaded(loaded)
         st.session_state.last_files_payload = [f.name for f in uploaded_files]
         st.success(f"Fichier(s) importé(s) avec succès : {', '.join([f.name for f in uploaded_files])}")
     elif use_last and st.session_state.last_files_payload:
-        st.info("Réutilisation des fichiers mémorisés (contenu rechargé depuis l’import précédent).")
-        # NOTE : on ne peut pas relire les fichiers côté serveur sans les pièces réelles.
-        # Ici on garde seulement l’info d’état. On invite donc à réimporter en pratique.
-        # Pour un stockage persistant réel : brancher un storage (S3/GDrive/DB).
+        st.info("Réutilisation des fichiers mémorisés.")
 except Exception as e:
     st.error(f"Erreur de lecture : {e}")
 
@@ -99,19 +97,15 @@ if df_raw.empty:
 # CALCULS
 # -----------------------------
 try:
-    # 1) Table créateurs (paliers + bonus débutant)
     creators_df = compute_creators_table(df_raw)
-
-    # 2) Tables agents / managers dérivées
-    agents_df   = compute_agents_table_from_creators(creators_df)
+    agents_df = compute_agents_table_from_creators(creators_df)
     managers_df = compute_managers_table_from_creators(creators_df)
-
 except Exception as e:
     st.error(f"Erreur lors du traitement des données : {e}")
     st.stop()
 
 # -----------------------------
-# AFFICHAGE PAR ONGLET
+# AFFICHAGE
 # -----------------------------
 tab_crea, tab_agents, tab_man = st.tabs(["Créateurs", "Agents", "Managers"])
 
