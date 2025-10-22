@@ -5,6 +5,20 @@ import pandas as pd
 import streamlit as st
 
 # --- imports “métier” ---
+# Fichiers courants (un ou plusieurs)
+dfs = []
+for f in uploaded_files:
+    df = ensure_df(load_df(f))
+    dfs.append(df)
+df_current = pd.concat(dfs, ignore_index=True) if dfs else None
+
+# Historique (optionnel)
+hist_dfs = []
+for f in history_files:
+    h = ensure_df(load_df(f))
+    hist_dfs.append(h)
+df_history = pd.concat(hist_dfs, ignore_index=True) if hist_dfs else None
+
 try:
     from utils import (
         load_df,                    # optionnel : si absent on lit localement
@@ -167,3 +181,4 @@ else:
         _download_button(managers, "⬇️ Exporter managers (CSV)", "recompenses_managers.csv")
     except Exception as e:
         st.error(f"Erreur dans compute_managers_table(utils.py) : {e}")
+
