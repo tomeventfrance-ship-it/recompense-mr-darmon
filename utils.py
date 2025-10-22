@@ -228,3 +228,7 @@ def compute_managers_table(creators_df: pd.DataFrame) -> pd.DataFrame:
         }
     ).reset_index().sort_values("Bonus total (diamants)", ascending=False)
     return agg
+def ensure_df(x):
+    """Retourne le DataFrame si x est un tuple (df, …)."""
+    return x[0] if isinstance(x, tuple) else x
+
