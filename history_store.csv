@@ -1,1 +1,18 @@
+from utils import load_df, compute_creators_table, compute_agents_table_from_creators, compute_managers_table_from_creators
+from history import load_history, save_history, update_history
+
+# … après avoir lu les fichiers uploadés :
+df_src = load_df(uploaded_files)
+
+# charger historique, calcul créateurs en tenant compte de l’historique
+hist = load_history()
+crea_table = compute_creators_table(df_src, history_df=hist)
+
+# mettre à jour l’historique (ever_150k / bonus_used) puis sauvegarder
+hist_new = update_history(hist, crea_table)
+save_history(hist_new)
+
+# tables Agents / Managers (non-cumul par créateur)
+agents_table   = compute_agents_table_from_creators(crea_table)
+managers_table = compute_managers_table_from_creators(crea_table)
 
