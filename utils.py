@@ -489,3 +489,54 @@ try:
     compute_managers_table
 except NameError:
     compute_managers_table = compute_managers
+# ===== Compatibilité avec app.py : shims d'export =====
+# app.py attend compute_creators_table / compute_agents_table / compute_managers_table.
+# Si tes fonctions ont d'autres noms (ex: compute_creators, build_creators_table, etc.),
+# on les détecte automatiquement et on délègue.
+
+from typing import Optional
+import pandas as pd
+
+def _resolve_callable(candidates):
+    """Retourne la première fonction existante parmi 'candidates' (ou None)."""
+    for name in candidates:
+        fn = globals().get(name)
+        if callable(fn):
+            return fn
+    return None
+
+def _fail(which, candidates):
+    raise ImportError(
+        f"Fonction '{which}' introuvable. "
+        f"Expose l'une de ces fonctions dans utils.py : {', '.join(candidates)} "
+        f"ou laisse ce shim déléguer vers elles."
+    )
+
+def compute_creators_table(df: pd.DataFrame, history_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    # NE PAS inclure notre propre nom dans les candidats pour éviter auto-référence
+    candidates = [
+        "_compute_creators_table", "compute_creators", "build_creators_table", "creators_table"
+    ]
+    fn = _resolve_callable(candidates)
+    if fn is None:
+        _fail("compute_creators_table", candidates)
+    return fn(df, history_df)
+
+def compute_agents_table(creators_df: pd.DataFrame) -> pd.DataFrame:
+    candidates = [
+        "_compute_agents_table", "compute_agents", "build_agents_table", "agents_table"
+    ]
+    fn = _resolve_callable(candidates)
+    if fn is None:
+        _fail("compute_agents_table", candidates)
+    return fn(creators_df)
+
+def compute_managers_table(creators_df: pd.DataFrame) -> pd.DataFrame:
+    candidates = [
+        "_compute_managers_table", "compute_managers", "build_managers_table", "managers_table"
+    ]
+    fn = _resolve_callable(candidates)
+    if fn is None:
+        _fail("compute_managers_table", candidates)
+    return fn(creators_df)
+
