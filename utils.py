@@ -473,3 +473,19 @@ def compute_managers_table_from_creators(
     agg.rename(columns={"Montant": "Total primes"}, inplace=True)
 
     return agg, pd.DataFrame(events)
+
+# --- Compat: noms attendus par app.py ---
+try:
+    compute_creators_table
+except NameError:
+    compute_creators_table = compute_creators  # adapte si ton vrai nom est build_creators_table, etc.
+
+try:
+    compute_agents_table
+except NameError:
+    compute_agents_table = compute_agents
+
+try:
+    compute_managers_table
+except NameError:
+    compute_managers_table = compute_managers
