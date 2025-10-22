@@ -1,66 +1,48 @@
 import streamlit as st
 import pandas as pd
-from utils import load_df, compute_creators_table
+from utils import load_df, keep_needed_columns
 
 st.set_page_config(page_title="Récompenses – Créateurs", page_icon="💎", layout="wide")
 
 st.title("💎 Récompenses – Créateurs")
-st.caption("Calcul automatique des récompenses (activité + paliers + bonus débutant) et répartition Agents / Managers.")
+st.caption("Affichage fidèle des données importées (colonnes nécessaires uniquement). Aucune logique agents/managers ici.")
 
 st.divider()
 
-# --- Téléversement ---
 uploaded_files = st.file_uploader(
-    "Importez votre/vos fichier(s) (.xlsx / .csv)",
+    "Importez un ou plusieurs fichiers (.xlsx, .xls, .csv)",
     type=["xlsx", "xls", "csv"],
     accept_multiple_files=True
 )
 
-# --- Lecture des fichiers ---
-dfs = []
-if uploaded_files:
-    for f in uploaded_files:
-        try:
-            df = load_df(f)
-            dfs.append(df)
-        except Exception as e:
-            st.error(f"Erreur de lecture du fichier **{f.name}** : {e}")
-else:
+if not uploaded_files:
     st.info("Importez au moins un fichier pour démarrer.")
     st.stop()
 
-# --- Calcul du tableau final ---
-try:
-    results = compute_creators_table(dfs)
-except Exception as e:
-    st.error(f"Erreur lors du traitement des données : {e}")
+dfs = []
+for f in uploaded_files:
+    try:
+        df = load_df(f)
+        df = keep_needed_columns(df)
+        dfs.append(df)
+    except Exception as e:
+        st.error(f"Erreur de lecture du fichier **{f.name}** : {e}")
+
+if not dfs:
+    st.error("Aucune donnée exploitable.")
     st.stop()
 
-if results is None or results.empty:
-    st.warning("Aucune donnée calculée. Vérifiez vos fichiers.")
-    st.stop()
+# Concat simple (lignes les unes sous les autres) sans dédoublonnage ni calcul.
+final_df = pd.concat(dfs, ignore_index=True)
 
-# --- Affichage du tableau ---
-st.success("✅ Fichiers importés avec succès et traités.")
-st.dataframe(results, use_container_width=True)
+st.success("✅ Fichier(s) chargé(s) et colonnes filtrées.")
+st.dataframe(final_df, use_container_width=True)
 
-# --- Téléchargement Excel ---
-@st.cache_data
-def convert_df_to_excel(df: pd.DataFrame) -> bytes:
-    from io import BytesIO
-    with pd.ExcelWriter(BytesIO(), engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name="Résultats")
-        writer.close()
-        data = writer.book
-    return writer.book
-
-try:
-    excel_data = results.to_csv(index=False).encode('utf-8')
-    st.download_button(
-        label="📥 Télécharger les résultats au format CSV",
-        data=excel_data,
-        file_name="recompenses_createurs.csv",
-        mime="text/csv"
-    )
-except Exception as e:
-    st.error(f"Erreur lors de la génération du fichier d'export : {e}")
+# Export CSV fidèle
+csv_bytes = final_df.to_csv(index=False).encode("utf-8")
+st.download_button(
+    "📥 Télécharger (CSV)",
+    data=csv_bytes,
+    file_name="createurs_filtre.csv",
+    mime="text/csv"
+)
