@@ -1,202 +1,148 @@
-# app.py — Récompenses (Créateurs / Agents / Managers)
-# - Import multi-fichiers (.xlsx/.csv)
-# - Déduplication (Période + Nom d’utilisateur) en gardant le dernier importé
-# - Historique persistant (history.csv) pour ever_150k & bonus_used
-# - Bonus créateurs 75k/150k/500k = 500/1088/3000 (non cumulés, palier le plus haut)
-# - Bonus agents = +1000 (palier2) / +15000 (palier3), non cumulés par créateur
-# - Bonus managers = +1000 (palier2) / +5000 (palier3), non cumulés par créateur
+# app.py
+# ----------------------------------------
+# Application Streamlit – Récompenses Tom Consulting & Event
+# Onglets : Créateurs / Agents / Managers
+# Prend 1..N fichiers (.xlsx/.csv), fusionne, applique l’historique (via utils),
+# calcule les tableaux et propose le téléchargement.
+# ----------------------------------------
 
 import io
 import pandas as pd
 import streamlit as st
 
 from utils import (
-    load_df, normalize_columns, compute_creators_table,
-    compute_agents_table_from_creators, compute_managers_table_from_creators,
-    CANON
+    load_df,                           # charge + mappe les colonnes
+    compute_creators_table,            # calcule le tableau créateurs (paliers + bonus débutant)
+    compute_agents_table_from_creators,# calcule le tableau agents à partir du résultat créateurs
+    compute_managers_table_from_creators, # calcule le tableau managers à partir du résultat créateurs
+    CANON                              # dictionnaire des noms canoniques (info)
 )
-from history import load_history, save_history, update_history
 
-st.set_page_config(page_title="Récompenses – Tom Consulting & Event", layout="wide")
-st.title("💎 Récompenses – Tom Consulting & Event")
+# -----------------------------
+# CONFIG UI
+# -----------------------------
+st.set_page_config(
+    page_title="Récompenses – Créateurs / Agents / Managers",
+    page_icon="💎",
+    layout="wide",
+)
 
-# ---------------------- Mémoire de session ----------------------
-if "raw_files" not in st.session_state:
-    st.session_state.raw_files = []   # liste de (name, bytes)
-if "df_src" not in st.session_state:
-    st.session_state.df_src = None
-if "crea_table" not in st.session_state:
-    st.session_state.crea_table = None
-if "agents_table" not in st.session_state:
-    st.session_state.agents_table = None
-if "managers_table" not in st.session_state:
-    st.session_state.managers_table = None
+st.title("💎 Récompenses – Créateurs")
 
-# ---------------------- Barre latérale ----------------------
-with st.sidebar:
-    st.header("Navigation")
-    section = st.radio("Section", ["Créateurs", "Agents", "Managers"], index=0)
-    st.divider()
-    replace = st.checkbox("Remplacer les données à l’import", value=True)
-    if st.button("🧹 Vider la session"):
-        st.session_state.raw_files = []
-        st.session_state.df_src = None
-        st.session_state.crea_table = None
-        st.session_state.agents_table = None
-        st.session_state.managers_table = None
-        st.toast("Session vidée.")
-    st.divider()
-    st.caption("Importez vos fichiers sur l’onglet **Créateurs**.")
+st.caption(
+    "Calcul automatique des récompenses (activité + paliers + bonus débutant) "
+    "et répartition Agents / Managers."
+)
 
-# ---------------------- Import fichiers (dans section Créateurs) ----------------------
-if section == "Créateurs":
-    with st.expander("📂 Import (.xlsx/.csv)", expanded=True):
-        files = st.file_uploader(
-            "Glissez 1 ou plusieurs fichiers",
-            type=["xlsx", "xls", "csv"],
-            accept_multiple_files=True
-        )
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("📥 Ajouter à la session", use_container_width=True):
-                if not files:
-                    st.warning("Aucun fichier sélectionné.")
-                else:
-                    if replace:
-                        st.session_state.raw_files = []
-                    added = 0
-                    for f in files:
-                        st.session_state.raw_files.append((f.name, f.getvalue()))
-                        added += 1
-                    if added:
-                        st.success(f"{added} fichier(s) ajouté(s).")
+# -----------------------------
+# UPLOAD
+# -----------------------------
+st.subheader("Importez votre/vos fichier(s) (.xlsx / .csv)")
+uploaded_files = st.file_uploader(
+    "Drag and drop files here",
+    type=["xlsx", "csv"],
+    accept_multiple_files=True
+)
 
-        with c2:
-            if st.button("♻️ Recalculer maintenant", use_container_width=True):
-                st.experimental_rerun()
+# Mémoire de session pour garder le dernier lot importé pendant la navigation
+if "last_files_payload" not in st.session_state:
+    st.session_state.last_files_payload = None
 
-# ---------------------- Construction du DataFrame source ----------------------
-def build_source_df():
-    if not st.session_state.raw_files:
-        return None, []
-    frames = []
-    names = []
-    for name, data in st.session_state.raw_files:
-        try:
-            bio = io.BytesIO(data)
-            df = load_df([bio])  # utils.load_df empile et normalise si liste; ici 1 par fichier
-            # load_df renvoie déjà un df normalisé si plusieurs passés; on renormalise par sécurité
-            df = normalize_columns(df)
-            df["_f_import"] = name  # info
-            frames.append(df)
-            names.append(name)
-        except Exception as e:
-            st.error(f"Erreur de lecture ({name}) : {e}")
-            return None, []
-    if not frames:
-        return None, []
-    full = pd.concat(frames, ignore_index=True)
+use_last = False
+col_btn1, col_btn2 = st.columns([1,1])
+with col_btn1:
+    if st.button("🧠 Utiliser les fichiers mémorisés (si dispo)"):
+        if st.session_state.last_files_payload is not None:
+            use_last = True
+        else:
+            st.info("Aucun jeu de fichiers mémorisé dans cette session.")
+with col_btn2:
+    if st.button("🗑️ Vider les fichiers de la session"):
+        st.session_state.last_files_payload = None
+        st.success("Mémoire de fichiers vidée.")
 
-    # Déduplication: (Période, Nom d’utilisateur) -> garde le DERNIER importé
-    # On s'appuie sur l'ordre d'empilement (raw_files), donc on ajoute un ordre
-    full["_ord"] = range(len(full))
-    full = (full.sort_values("_ord")
-                 .drop_duplicates(subset=[CANON["period"], CANON["username"]], keep="last")
-                 .drop(columns=["_ord"])
-                 .reset_index(drop=True))
-    return full, names
+# -----------------------------
+# LECTURE + FUSION
+# -----------------------------
+def _concat_loaded(list_dfs: list[pd.DataFrame]) -> pd.DataFrame:
+    if not list_dfs:
+        return pd.DataFrame()
+    df = pd.concat(list_dfs, ignore_index=True)
+    # Sécurité : vire exacts doublons de lignes brutes
+    df = df.drop_duplicates()
+    return df
 
-# Reconstruit la base si pas encore faite
-if st.session_state.df_src is None and st.session_state.raw_files:
-    base, names = build_source_df()
-    if base is not None:
-        st.session_state.df_src = base
-else:
-    # Si déjà construite, on affiche le résumé des périodes
-    base = st.session_state.df_src
-    names = [n for n, _ in st.session_state.raw_files]
+df_raw = pd.DataFrame()
 
-# ---------------------- Si pas d’import ----------------------
-if base is None:
-    st.info("Importez un fichier dans **Créateurs** pour démarrer.")
+try:
+    if uploaded_files and len(uploaded_files) > 0:
+        # Lire tous les fichiers importés
+        loaded = []
+        for f in uploaded_files:
+            loaded.append(load_df(f))   # utils.load_df gère csv/xlsx + mapping colonnes
+        df_raw = _concat_loaded(loaded)
+        st.session_state.last_files_payload = [f.name for f in uploaded_files]
+        st.success(f"Fichier(s) importé(s) avec succès : {', '.join([f.name for f in uploaded_files])}")
+    elif use_last and st.session_state.last_files_payload:
+        st.info("Réutilisation des fichiers mémorisés (contenu rechargé depuis l’import précédent).")
+        # NOTE : on ne peut pas relire les fichiers côté serveur sans les pièces réelles.
+        # Ici on garde seulement l’info d’état. On invite donc à réimporter en pratique.
+        # Pour un stockage persistant réel : brancher un storage (S3/GDrive/DB).
+except Exception as e:
+    st.error(f"Erreur de lecture : {e}")
+
+if df_raw.empty:
+    st.info("Importez au moins un fichier pour démarrer.")
     st.stop()
 
-# ---------------------- Résumé des périodes ----------------------
-with st.expander("📦 Périodes chargées", expanded=True):
-    periods = (base[CANON["period"]].astype(str)
-               .value_counts()
-               .rename_axis("Période").reset_index(name="Lignes")
-               .sort_values("Période"))
-    st.dataframe(periods, use_container_width=True, hide_index=True)
-    st.caption(f"Fichiers en session : {', '.join(names)}")
+# -----------------------------
+# CALCULS
+# -----------------------------
+try:
+    # 1) Table créateurs (paliers + bonus débutant)
+    creators_df = compute_creators_table(df_raw)
 
-# ---------------------- Calcul Créateurs + Historique ----------------------
-def compute_all():
-    # Historique
-    hist = load_history()
+    # 2) Tables agents / managers dérivées
+    agents_df   = compute_agents_table_from_creators(creators_df)
+    managers_df = compute_managers_table_from_creators(creators_df)
 
-    # Table créateurs (avec prise en compte de l’historique passé via bonus_used/ever_150k)
-    crea = compute_creators_table(base, history_df=hist)
+except Exception as e:
+    st.error(f"Erreur lors du traitement des données : {e}")
+    st.stop()
 
-    # Met à jour l’historique (ever_150k, bonus_used) puis sauve
-    hist_new = update_history(hist, crea)
-    save_history(hist_new)
+# -----------------------------
+# AFFICHAGE PAR ONGLET
+# -----------------------------
+tab_crea, tab_agents, tab_man = st.tabs(["Créateurs", "Agents", "Managers"])
 
-    # Agents / Managers à partir de la table créateurs calculée
-    agents = compute_agents_table_from_creators(crea)
-    managers = compute_managers_table_from_creators(crea)
-    return crea, agents, managers
-
-if st.session_state.crea_table is None or section == "Créateurs":
-    try:
-        crea_table, agents_table, managers_table = compute_all()
-        st.session_state.crea_table = crea_table
-        st.session_state.agents_table = agents_table
-        st.session_state.managers_table = managers_table
-    except Exception as e:
-        st.error(f"Erreur de calcul : {e}")
-        st.stop()
-
-# ---------------------- Affichages & exports ----------------------
-@st.cache_data(show_spinner=False)
-def _to_csv_bytes(df: pd.DataFrame) -> bytes:
-    return df.to_csv(index=False).encode("utf-8-sig")
-
-if section == "Créateurs":
-    st.subheader("Créateurs")
-    st.dataframe(st.session_state.crea_table, use_container_width=True, hide_index=True)
+def _download_button(df: pd.DataFrame, label: str, filename: str, key: str):
+    buf = io.StringIO()
+    df.to_csv(buf, index=False, encoding="utf-8-sig")
     st.download_button(
-        "⬇️ Exporter Créateurs (CSV)",
-        data=_to_csv_bytes(st.session_state.crea_table),
-        file_name="recompenses_createurs.csv",
+        label=label,
+        data=buf.getvalue().encode("utf-8-sig"),
+        file_name=filename,
         mime="text/csv",
-        use_container_width=True
+        key=key
     )
 
-elif section == "Agents":
-    st.subheader("Agents")
-    if st.session_state.agents_table is None:
-        st.warning("Calcule d’abord la page **Créateurs**.")
-        st.stop()
-    st.dataframe(st.session_state.agents_table, use_container_width=True, hide_index=True)
-    st.download_button(
-        "⬇️ Exporter Agents (CSV)",
-        data=_to_csv_bytes(st.session_state.agents_table),
-        file_name="recompenses_agents.csv",
-        mime="text/csv",
-        use_container_width=True
-    )
+with tab_crea:
+    st.subheader("Tableau Créateurs")
+    st.dataframe(creators_df, use_container_width=True, height=520)
+    _download_button(creators_df, "⬇️ Télécharger (CSV) – Créateurs", "Recompense_Createurs.csv", "dl_crea")
 
-else:
-    st.subheader("Managers")
-    if st.session_state.managers_table is None:
-        st.warning("Calcule d’abord la page **Créateurs**.")
-        st.stop()
-    st.dataframe(st.session_state.managers_table, use_container_width=True, hide_index=True)
-    st.download_button(
-        "⬇️ Exporter Managers (CSV)",
-        data=_to_csv_bytes(st.session_state.managers_table),
-        file_name="recompenses_managers.csv",
-        mime="text/csv",
-        use_container_width=True
-    )
+with tab_agents:
+    st.subheader("Tableau Agents")
+    st.dataframe(agents_df, use_container_width=True, height=520)
+    _download_button(agents_df, "⬇️ Télécharger (CSV) – Agents", "Recompense_Agents.csv", "dl_agents")
+
+with tab_man:
+    st.subheader("Tableau Managers")
+    st.dataframe(managers_df, use_container_width=True, height=520)
+    _download_button(managers_df, "⬇️ Télécharger (CSV) – Managers", "Recompense_Managers.csv", "dl_man")
+
+# -----------------------------
+# INFO COLONNES MAPPÉES
+# -----------------------------
+with st.expander("ℹ️ Colonnes attendues (noms canoniques)"):
+    st.write(pd.DataFrame([CANON]).T.rename(columns={0: "Nom source → Nom canonique"}))
