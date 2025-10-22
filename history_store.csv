@@ -1,18 +1,44 @@
-from utils import load_df, compute_creators_table, compute_agents_table_from_creators, compute_managers_table_from_creators
-from history import load_history, save_history, update_history
+from pathlib import Path
+import pandas as pd
 
-# … après avoir lu les fichiers uploadés :
-df_src = load_df(uploaded_files)
+HISTORY_PATH = Path("history.csv")  # persistant tant que le déploiement ne change pas
 
-# charger historique, calcul créateurs en tenant compte de l’historique
-hist = load_history()
-crea_table = compute_creators_table(df_src, history_df=hist)
+def load_history() -> pd.DataFrame:
+    if HISTORY_PATH.exists():
+        df = pd.read_csv(HISTORY_PATH)
+        for c in ["ever_150k", "bonus_used"]:
+            if c in df.columns:
+                df[c] = df[c].astype(bool)
+        return df
+    return pd.DataFrame(columns=["username", "ever_150k", "bonus_used"])
 
-# mettre à jour l’historique (ever_150k / bonus_used) puis sauvegarder
-hist_new = update_history(hist, crea_table)
-save_history(hist_new)
+def save_history(df: pd.DataFrame) -> None:
+    cols = ["username", "ever_150k", "bonus_used"]
+    for c in cols:
+        if c not in df.columns:
+            df[c] = False if c != "username" else ""
+    df[cols].to_csv(HISTORY_PATH, index=False)
 
-# tables Agents / Managers (non-cumul par créateur)
-agents_table   = compute_agents_table_from_creators(crea_table)
-managers_table = compute_managers_table_from_creators(crea_table)
+def update_history(history_df: pd.DataFrame, creators_df: pd.DataFrame) -> pd.DataFrame:
+    hist = history_df.copy()
+    if "username" not in hist.columns:
+        hist = pd.DataFrame(columns=["username", "ever_150k", "bonus_used"])
 
+    # marquer les >=150k comme "ever_150k"
+    reached = creators_df[[ "Nom d’utilisateur", "Diamants", "Palier bonus (1/2/3)", "Montant bonus (débutant)"]].copy()
+    reached["ever_150k_new"] = reached["Diamants"].fillna(0) >= 150_000
+    reached["bonus_used_new"] = reached["Montant bonus (débutant)"].fillna(0) > 0
+
+    # fusion par username
+    merged = pd.merge(
+        hist,
+        reached.rename(columns={"Nom d’utilisateur": "username"})[["username", "ever_150k_new", "bonus_used_new"]],
+        on="username",
+        how="outer"
+    ).fillna(False)
+
+    merged["ever_150k"] = merged[["ever_150k", "ever_150k_new"]].any(axis=1)
+    merged["bonus_used"] = merged[["bonus_used", "bonus_used_new"]].any(axis=1)
+
+    out = merged[["username", "ever_150k", "bonus_used"]].drop_duplicates("username")
+    return out
