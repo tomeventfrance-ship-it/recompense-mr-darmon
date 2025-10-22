@@ -1,76 +1,66 @@
-# app.py  (mode safe: un ou plusieurs fichiers, pas de cache, lecture directe)
-import pandas as pd
 import streamlit as st
-from utils import (
-    compute_creators_table,
-    compute_agents_table_from_creators,
-    compute_managers_table_from_creators,
+import pandas as pd
+from utils import load_df, compute_creators_table
+
+st.set_page_config(page_title="Récompenses – Créateurs", page_icon="💎", layout="wide")
+
+st.title("💎 Récompenses – Créateurs")
+st.caption("Calcul automatique des récompenses (activité + paliers + bonus débutant) et répartition Agents / Managers.")
+
+st.divider()
+
+# --- Téléversement ---
+uploaded_files = st.file_uploader(
+    "Importez votre/vos fichier(s) (.xlsx / .csv)",
+    type=["xlsx", "xls", "csv"],
+    accept_multiple_files=True
 )
 
-st.set_page_config(page_title="Récompenses – Créateurs / Agents / Managers", page_icon="💎", layout="wide")
-st.title("💎 Récompenses – Créateurs")
-
-st.caption("Importez un ou plusieurs .xlsx/.csv (mois courant + historiques). Aucune mémorisation en session pour éviter les erreurs de type.")
-
-def read_any(uploaded_file):
-    """Lecture directe depuis l'UploadedFile (évite tout .read() / .getvalue())."""
-    name = uploaded_file.name.lower()
-    uploaded_file.seek(0)
-    if name.endswith(".xlsx") or name.endswith(".xls"):
-        return pd.read_excel(uploaded_file, engine="openpyxl")
-    elif name.endswith(".csv"):
+# --- Lecture des fichiers ---
+dfs = []
+if uploaded_files:
+    for f in uploaded_files:
         try:
-            return pd.read_csv(uploaded_file)
-        except UnicodeDecodeError:
-            uploaded_file.seek(0)
-            return pd.read_csv(uploaded_file, encoding="latin-1")
-    else:
-        raise ValueError(f"Extension non supportée: {uploaded_file.name}")
-
-def concat_clean(dfs):
-    if not dfs:
-        return pd.DataFrame()
-    return pd.concat(dfs, ignore_index=True).drop_duplicates()
-
-uploaded = st.file_uploader("Drag and drop files here", type=["xlsx", "xls", "csv"], accept_multiple_files=True)
-
-if not uploaded:
+            df = load_df(f)
+            dfs.append(df)
+        except Exception as e:
+            st.error(f"Erreur de lecture du fichier **{f.name}** : {e}")
+else:
     st.info("Importez au moins un fichier pour démarrer.")
     st.stop()
 
-# Lire tous les fichiers importés
-dfs = []
+# --- Calcul du tableau final ---
 try:
-    for f in uploaded:
-        dfs.append(read_any(f))
-    df_raw = concat_clean(dfs)
-except Exception as e:
-    st.error(f"Erreur de lecture : {e}")
-    st.stop()
-
-# Calculs
-try:
-    crea = compute_creators_table(df_raw)
-    agents = compute_agents_table_from_creators(crea)
-    managers = compute_managers_table_from_creators(crea)
+    results = compute_creators_table(dfs)
 except Exception as e:
     st.error(f"Erreur lors du traitement des données : {e}")
     st.stop()
 
-# UI
-tab1, tab2, tab3 = st.tabs(["Créateurs", "Agents", "Managers"])
+if results is None or results.empty:
+    st.warning("Aucune donnée calculée. Vérifiez vos fichiers.")
+    st.stop()
 
-with tab1:
-    st.subheader("Créateurs")
-    st.dataframe(crea, use_container_width=True, height=520)
-    st.download_button("⬇️ CSV Créateurs", crea.to_csv(index=False, encoding="utf-8-sig"), "Recompense_Createurs.csv", "text/csv")
+# --- Affichage du tableau ---
+st.success("✅ Fichiers importés avec succès et traités.")
+st.dataframe(results, use_container_width=True)
 
-with tab2:
-    st.subheader("Agents")
-    st.dataframe(agents, use_container_width=True, height=520)
-    st.download_button("⬇️ CSV Agents", agents.to_csv(index=False, encoding="utf-8-sig"), "Recompense_Agents.csv", "text/csv")
+# --- Téléchargement Excel ---
+@st.cache_data
+def convert_df_to_excel(df: pd.DataFrame) -> bytes:
+    from io import BytesIO
+    with pd.ExcelWriter(BytesIO(), engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name="Résultats")
+        writer.close()
+        data = writer.book
+    return writer.book
 
-with tab3:
-    st.subheader("Managers")
-    st.dataframe(managers, use_container_width=True, height=520)
-    st.download_button("⬇️ CSV Managers", managers.to_csv(index=False, encoding="utf-8-sig"), "Recompense_Managers.csv", "text/csv")
+try:
+    excel_data = results.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="📥 Télécharger les résultats au format CSV",
+        data=excel_data,
+        file_name="recompenses_createurs.csv",
+        mime="text/csv"
+    )
+except Exception as e:
+    st.error(f"Erreur lors de la génération du fichier d'export : {e}")
