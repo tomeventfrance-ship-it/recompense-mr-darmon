@@ -1,333 +1,244 @@
-import io
-import re
-from pathlib import Path
-from typing import List, Tuple, Optional
-
-import numpy as np
 import pandas as pd
+import numpy as np
 
-# ----------------------- Référentiel colonnes (source) -----------------------
+# --- PARAMÈTRES GLOBAUX ---
 
-# Variants tolérés (casse/accents ignorés) -> clé canonique
-ALIAS = {
-    # A
-    "periode des donnees": "period",
-    "période des données": "period",
-    # C
-    "nom d'utilisateur du/de la créateur(trice)": "username",
-    "nom d'utilisateur": "username",
-    "createur": "username",
-    "créateur": "username",
-    # D
-    "groupe": "group",
-    "groupe/manager": "group",
-    "manager": "group",
-    # E
-    "agent": "agent",
-    # F
-    "date d'etablissement de la relation": "relation_date",
-    "date d’établissement de la relation": "relation_date",
-    # H
-    "diamants": "diamonds",
-    # I
-    "duree de live (heures)": "live_hours",
-    "durée de live (heures)": "live_hours",
-    "duree de live": "live_hours",
-    "durée de live": "live_hours",
-    "durée de live (h)": "live_hours",
-    # J
-    "jours de passage en live valides": "live_days",
-    "jours de passage en live": "live_days",
-    "jours de passage en live (valides)": "live_days",
-    # AL
-    "statut du diplome": "al_status",
-    "statut du diplôme": "al_status",
-    "al": "al_status",
+BONUS_CREATOR = {
+    1: {"threshold": 75000, "bonus": 500},
+    2: {"threshold": 150000, "bonus": 1088},
+    3: {"threshold": 500000, "bonus": 3000},
 }
 
-# Colonnes canoniques attendues ensuite par le code
-CANON = {
-    "period": "Période",
-    "username": "Nom d’utilisateur",
-    "group": "Groupe",
-    "agent": "Agent",
-    "relation_date": "Date relation",
-    "diamonds": "Diamants",
-    "live_hours": "Durée live (h)",
-    "live_days": "Jours live",
-    "al_status": "AL",
+BONUS_AGENT = {
+    2: {"bonus": 1000},
+    3: {"bonus": 15000},
 }
 
-NEEDED_CANON = list(CANON.keys())
+BONUS_MANAGER = {
+    2: {"bonus": 1000},
+    3: {"bonus": 5000},
+}
 
-# ----------------------- Paramètres de calcul -----------------------
+# --- CHARGEMENT SÉCURISÉ ---
 
-# Seuils paliers créateurs (diamants du mois)
-PALIER_SEUILS = {1: 75_000, 2: 150_000, 3: 500_000}
+def load_df(uploaded_file):
+    """Lit proprement CSV ou Excel"""
+    if uploaded_file.name.endswith(".csv"):
+        try:
+            return pd.read_csv(uploaded_file)
+        except UnicodeDecodeError:
+            uploaded_file.seek(0)
+            return pd.read_csv(uploaded_file, encoding="latin-1")
+    else:
+        return pd.read_excel(uploaded_file, engine="openpyxl")
 
-# Bonus créateurs (débutant) – en diamants – non cumulés (on prend le plus haut atteint)
-BONUS_CREATOR = {1: 500, 2: 1088, 3: 3000}
+# --- FILTRAGE DES COLONNES ---
 
-# Bonus Agents / Managers (par créateur, non cumulés)
-BONUS_AGENT   = {2: 1000, 3: 15_000}
-BONUS_MANAGER = {2: 1000, 3: 5_000}
-
-# Critères "Actif" pour le mois (adapter si besoin)
-MIN_LIVE_DAYS  = 1
-MIN_LIVE_HOURS = 0
-
-
-# ----------------------- Utils internes -----------------------
-
-def _slug(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
-
-
-def _map_columns(df: pd.DataFrame) -> pd.DataFrame:
-    mapping = {}
-    for col in df.columns:
-        key = _slug(col)
-        if key in ALIAS:
-            mapping[col] = CANON[ALIAS[key]]
+def normalize_columns(df):
+    mapping = {
+        "Période des données": "periode",
+        "Nom d'utilisateur du/de la créateur(trice)": "username",
+        "Groupe": "groupe",
+        "Agent": "agent",
+        "Date d'établissement de la relation": "relation_date",
+        "Diamants": "diamants",
+        "Durée de LIVE": "heures_live",
+        "Jours de passage en LIVE valides": "jours_live",
+        "Statut du diplôme": "statut",
+    }
     df = df.rename(columns=mapping)
+    keep = list(mapping.values())
+    return df[[c for c in df.columns if c in keep]]
+# --- NETTOYAGE & TYPES ---
+
+def _coerce_numeric(s):
+    """Convertit en nombre en tolérant les '1 234', '1,234', NaN, etc."""
+    if s is None:
+        return 0
+    return pd.to_numeric(
+        pd.Series(s)
+          .astype(str)
+          .str.replace("\u202f", "", regex=False)  # espace fine insécable
+          .str.replace(" ", "", regex=False)
+          .str.replace(",", ".", regex=False),
+        errors="coerce"
+    ).fillna(0).astype(float)
+
+def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Garde uniquement les colonnes utiles et force les types."""
+    df = normalize_columns(df).copy()
+
+    # Colonnes obligatoires : si absentes, on les crée vides pour éviter les crashs
+    for col, default in [
+        ("periode", ""),
+        ("username", ""),
+        ("groupe", ""),
+        ("agent", ""),
+        ("relation_date", ""),
+        ("diamants", 0),
+        ("heures_live", 0),
+        ("jours_live", 0),
+        ("statut", ""),
+    ]:
+        if col not in df.columns:
+            df[col] = default
+
+    # Numériques
+    df["diamants"]   = _coerce_numeric(df["diamants"])
+    df["heures_live"]= _coerce_numeric(df["heures_live"])
+    df["jours_live"] = _coerce_numeric(df["jours_live"]).astype(int)
+
+    # Texte normalisé
+    for col in ["username", "groupe", "agent", "statut"]:
+        df[col] = df[col].astype(str).fillna("").str.strip()
+
+    # Statut débutant (90j) => True/False
+    df["is_debutant_90j"] = df["statut"].str.lower().str.contains("débutant") & \
+                            df["statut"].str.contains("90", case=False)
+
+    # Index stable pour jointures éventuelles
+    if "username" in df.columns:
+        df["user_key"] = df["username"].str.lower().str.strip()
+    else:
+        df["user_key"] = ""
+
     return df
 
+# --- PALIERS & BONUS ---
 
-def _assert_required(df: pd.DataFrame):
-    missing = [CANON[k] for k in NEEDED_CANON if CANON[k] not in df.columns]
-    if missing:
-        raise ValueError(f"Colonnes manquantes: {', '.join(missing)}")
-
-
-def _coerce_types(df: pd.DataFrame) -> pd.DataFrame:
-    # numériques
-    for c in [CANON["diamonds"], CANON["live_hours"], CANON["live_days"]]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
-
-    # textes
-    for c in [CANON["username"], CANON["group"], CANON["agent"], CANON["al_status"]]:
-        if c in df.columns:
-            df[c] = df[c].astype(str).fillna("")
-
-    # période / date relation (laisse tel quel si non parsable)
-    if CANON["period"] in df.columns:
-        df[CANON["period"]] = df[CANON["period"]].astype(str)
-
-    if CANON["relation_date"] in df.columns:
-        df[CANON["relation_date"]] = df[CANON["relation_date"]].astype(str)
-
-    return df
-
-
-def _is_debutant(al_text: str) -> bool:
-    s = _slug(al_text)
-    # interprétation souple : mention "debutant", et pas "diplome"
-    return ("debutant" in s) and ("diplome" not in s)
-
-
-# ----------------------- Lecture fichiers upload -----------------------
-
-def load_df(uploaded_files: List[io.BytesIO]) -> pd.DataFrame:
-    """Empile plusieurs .xlsx/.csv, ne garde QUE les colonnes utiles, normalise les noms."""
-    frames = []
-    for up in uploaded_files:
-        name = getattr(up, "name", "file")
-        name_l = name.lower()
-        if name_l.endswith(".xlsx") or name_l.endswith(".xls"):
-            df = pd.read_excel(up)
-        elif name_l.endswith(".csv"):
-            df = pd.read_csv(up)
-        else:
-            raise ValueError(f"Format non supporté pour {name}")
-
-        df = _map_columns(df)
-
-        # garde uniquement colonnes utiles si présentes
-        keep = [v for v in CANON.values() if v in df.columns]
-        df = df[keep].copy()
-
-        frames.append(df)
-
-    if not frames:
-        raise ValueError("Aucun fichier lisible importé.")
-
-    out = pd.concat(frames, ignore_index=True)
-    _assert_required(out)
-    out = _coerce_types(out)
-    return out
-
-
-# ----------------------- Calculs CREATOR -----------------------
-
-def _palier_from_diamonds(d: float) -> int:
-    if d >= PALIER_SEUILS[3]:
+def palier_from_diamonds(d):
+    if d >= BONUS_CREATOR[3]["threshold"]:
         return 3
-    if d >= PALIER_SEUILS[2]:
+    if d >= BONUS_CREATOR[2]["threshold"]:
         return 2
-    if d >= PALIER_SEUILS[1]:
+    if d >= BONUS_CREATOR[1]["threshold"]:
         return 1
     return 0
 
+def highest_creator_bonus(d):
+    """Retourne (palier, montant_bonus) non cumulable (uniquement le plus haut atteint)."""
+    p = palier_from_diamonds(d)
+    if p == 0:
+        return 0, 0
+    return p, BONUS_CREATOR[p]["bonus"]
 
-def debutant_bonus_series(diamants: pd.Series,
-                          al_col: pd.Series,
-                          already_used: Optional[pd.Series] = None) -> Tuple[pd.Series, pd.Series]:
+def agent_manager_bonus(palier):
     """
-    Calcule le palier bonus créateur (0/1/2/3) si DEBUTANT, non cumulés, et renvoie:
-    - palier (int)
-    - montant (int)
-    already_used: bool série (True si créateur a déjà consommé ses bonus par le passé)
+    Renvoie (bonus_agent, bonus_manager) en appliquant la règle non-cumulable :
+    - Agent  : palier 2 -> 1000 ; palier 3 -> 15000 ; sinon 0
+    - Manager: palier 2 -> 1000 ; palier 3 -> 5000 ; sinon 0
     """
-    is_debutant = al_col.fillna("").map(_is_debutant)
+    bonus_agent = BONUS_AGENT.get(palier, {}).get("bonus", 0)
+    bonus_manager = BONUS_MANAGER.get(palier, {}).get("bonus", 0)
+    return bonus_agent, bonus_manager
 
-    paliers = diamants.fillna(0).map(_palier_from_diamonds)
-    paliers = np.where(is_debutant, paliers, 0).astype(int)
+# --- BONUS DÉBUTANT À VIE (UNE SEULE FOIS DANS LA FENÊTRE 90J) ---
 
-    # si déjà consommé (historique), force à 0
-    if already_used is not None:
-        paliers = np.where(already_used.fillna(False), 0, paliers).astype(int)
-
-    montant = np.select(
-        [paliers == 3, paliers == 2, paliers == 1],
-        [BONUS_CREATOR[3], BONUS_CREATOR[2], BONUS_CREATOR[1]],
-        default=0
-    ).astype(int)
-
-    return pd.Series(paliers, index=diamants.index), pd.Series(montant, index=diamants.index)
-
-
-def compute_creators_table(df_src: pd.DataFrame,
-                           history_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+def debutant_bonus_series(diamants_s: pd.Series,
+                          al_s: pd.Series,
+                          bonus_used=None):
     """
-    df_src: DataFrame normalisé (load_df)
-    history_df: DataFrame optionnel avec colonnes ['username','ever_150k','bonus_used']
+    Calcule l'éligibilité au bonus débutant pour chaque ligne.
+    - al_s : série booléenne 'is_debutant_90j'
+    - bonus_used : set de user_key déjà récompensés (optionnel, pour l'historique)
+    Retourne (elig_bool_series, montant_bonus_series)
+    Rappels montant : palier1=500, palier2=1088, palier3=3000 (non cumulable -> le plus haut)
     """
-    df = df_src.copy()
+    if bonus_used is None:
+        bonus_used = set()
 
-    # Actif simple (adapter si besoin)
-    df["Actif"] = np.where(
-        (df[CANON["live_days"]] >= MIN_LIVE_DAYS) & (df[CANON["live_hours"]] >= MIN_LIVE_HOURS),
-        "Validé", "Non validé"
-    )
+    # Palier le plus haut atteint pour chaque ligne
+    paliers = diamants_s.apply(palier_from_diamonds)
+    bonus_amounts = paliers.map({0:0, 1:BONUS_CREATOR[1]["bonus"],
+                                     2:BONUS_CREATOR[2]["bonus"],
+                                     3:BONUS_CREATOR[3]["bonus"]})
 
-    # info historique: déjà consommé bonus ?
-    already_used_map = None
-    if history_df is not None and not history_df.empty:
-        # username unique
-        used = history_df.drop_duplicates("username").set_index("username")["bonus_used"].astype(bool)
-        already_used_map = df[CANON["username"]].map(used).fillna(False)
+    # éligible si débutant ET pas déjà utilisé dans l'historique
+    elig = al_s & (~al_s.index.to_series().map(lambda i: False))  # base True pour les débutants
+
+    # On ne retire ici aucun "déjà utilisé" faute d'historique user_key au niveau ligne.
+    # Le filtrage « déjà utilisé » se fera dans compute_creators_table si history est fourni.
+
+    return (elig & (paliers > 0)), bonus_amounts.where(paliers > 0, 0)
+def compute_creators_table(data_or_list, history_df: pd.DataFrame | None = None) -> pd.DataFrame:
+    """
+    data_or_list : DataFrame unique OU liste de DataFrames (mois courant + historiques).
+    history_df   : historique externe optionnel, avec au minimum 'user_key' et 'bonus_debutant_utilise' (bool).
+    """
+    # 1) Fusionne si liste
+    if isinstance(data_or_list, list):
+        dfs = [prepare_df(d) for d in data_or_list if d is not None and len(d)]
+        if not dfs:
+            return pd.DataFrame()
+        base = pd.concat(dfs, ignore_index=True)
+    elif isinstance(data_or_list, pd.DataFrame):
+        base = prepare_df(data_or_list)
     else:
-        already_used_map = pd.Series(False, index=df.index)
+        return pd.DataFrame()
 
-    palier_bonus, montant_bonus = debutant_bonus_series(
-        df[CANON["diamonds"]],
-        df[CANON["al_status"]],
-        already_used=already_used_map
+    # 2) Historique des bonus déjà utilisés (optionnel)
+    already_used = set()
+    if history_df is not None and "user_key" in history_df.columns and "bonus_debutant_utilise" in history_df.columns:
+        tmp = history_df.copy()
+        tmp["user_key"] = tmp["user_key"].astype(str).str.lower().str.strip()
+        already_used = set(tmp.loc[tmp["bonus_debutant_utilise"] == True, "user_key"].unique())
+
+    # 3) Bonus débutant (éligibilité + montant), puis on invalide ceux déjà utilisés via l'historique
+    elig_s, debut_bonus_amount_s = debutant_bonus_series(
+        base["diamants"], base["is_debutant_90j"]
+    )
+    # Invalidation par historique
+    if len(already_used) > 0:
+        mask_used = base["user_key"].isin(already_used)
+        elig_s = elig_s & (~mask_used)
+
+    base["bonus_debutant_elig"]   = elig_s
+    base["bonus_debutant_montant"] = debut_bonus_amount_s.where(base["bonus_debutant_elig"], 0)
+
+    # 4) Palier atteints & bonus créateur (non cumulable)
+    base["palier"] = base["diamants"].apply(palier_from_diamonds)
+    base["bonus_createur_montant"] = base["palier"].map({
+        0: 0,
+        1: BONUS_CREATOR[1]["bonus"],
+        2: BONUS_CREATOR[2]["bonus"],
+        3: BONUS_CREATOR[3]["bonus"],
+    })
+
+    # 5) Bonus Agent / Manager (non cumulables et dépendants du palier)
+    agent_bonus, manager_bonus = [], []
+    for p in base["palier"].tolist():
+        a, m = agent_manager_bonus(p)
+        agent_bonus.append(a)
+        manager_bonus.append(m)
+    base["bonus_agent"] = agent_bonus
+    base["bonus_manager"] = manager_bonus
+
+    # 6) Colonnes d’affichage / libellés
+    base["bonus_libelle"] = np.select(
+        [
+            base["palier"].eq(3),
+            base["palier"].eq(2),
+            base["palier"].eq(1),
+        ],
+        ["Bonus 3 (500k)", "Bonus 2 (150k)", "Bonus 1 (75k)"],
+        default="Aucun"
     )
 
-    df["Palier bonus (1/2/3)"] = palier_bonus
-    df["Montant bonus (débutant)"] = montant_bonus
+    # 7) Total créateur (palier non cumulable + bonus débutant si éligible)
+    base["recompense_totale"] = base["bonus_createur_montant"] + base["bonus_debutant_montant"]
 
-    # Lorsque palier 2 ou 3 atteint, on n'affiche pas 1; et 3 cache 2 => déjà géré par "max" ci-dessus
-    # (On affiche juste le palier max et son montant)
-
-    # Récompense totale (ex: ici = Diamants actifs + bonus débutant) -> ajuster selon règle métier finale
-    actifs_diam = np.where(df["Actif"].eq("Validé"), df[CANON["diamonds"]], 0)
-    df["Récompense totale"] = (actifs_diam + df["Montant bonus (débutant)"]).astype(int)
-
-    # tri & colonnes finales
+    # 8) Sélection et ordre final des colonnes (uniquement celles validées + résultats)
     final_cols = [
-        CANON["period"], CANON["username"], CANON["group"], CANON["agent"],
-        CANON["relation_date"], CANON["diamonds"], CANON["live_hours"],
-        CANON["live_days"], CANON["al_status"],
-        "Actif", "Palier bonus (1/2/3)", "Montant bonus (débutant)", "Récompense totale"
+        "periode", "username", "groupe", "agent", "relation_date",
+        "diamants", "heures_live", "jours_live", "statut",
+        "palier", "bonus_libelle",
+        "bonus_debutant_elig", "bonus_debutant_montant",
+        "bonus_createur_montant",
+        "bonus_agent", "bonus_manager",
+        "recompense_totale",
     ]
-    df = df[final_cols].sort_values(CANON["diamonds"], ascending=False).reset_index(drop=True)
-    return df
+    out = base[final_cols].copy()
 
-
-# ----------------------- Calculs AGENTS / MANAGERS (non cumulés par créateur) -----------------------
-
-def compute_agents_table_from_creators(crea_table: pd.DataFrame) -> pd.DataFrame:
-    active_mask = crea_table["Actif"].eq("Validé")
-
-    # palier max par créateur sur lignes actives
-    per_creator = (
-        crea_table.loc[active_mask, [CANON["agent"], CANON["username"], "Palier bonus (1/2/3)", CANON["diamonds"]]]
-        .groupby([CANON["agent"], CANON["username"]], as_index=False)
-        .agg({"Palier bonus (1/2/3)": "max", CANON["diamonds"]: "sum"})
-        .rename(columns={CANON["diamonds"]: "Diamants actifs (créa)"})
-    )
-
-    # bonus par créateur (non cumulés, 3 > 2)
-    per_creator["Bonus agent (créa)"] = np.select(
-        [
-            per_creator["Palier bonus (1/2/3)"].eq(3),
-            per_creator["Palier bonus (1/2/3)"].eq(2),
-        ],
-        [BONUS_AGENT[3], BONUS_AGENT[2]],
-        default=0
-    )
-
-    g_all   = crea_table.groupby(CANON["agent"], dropna=False)[CANON["diamonds"]].sum().rename("Diamants totaux")
-    g_act   = per_creator.groupby(CANON["agent"], dropna=False)["Diamants actifs (créa)"].sum().rename("Diamants actifs")
-    g_bon   = per_creator.groupby(CANON["agent"], dropna=False)["Bonus agent (créa)"].sum().rename("Bonus agent")
-
-    def _agent_comm(x: int) -> int:
-        if x < 200_000: return 0
-        if x < 4_000_000: return round(x * 0.02)
-        return round(x * 0.03)
-
-    commission = g_act.apply(_agent_comm).rename("Commission").astype(int)
-
-    out = pd.concat([g_act.astype(int), g_all.astype(int)], axis=1)
-    out["Pertes"] = (out["Diamants totaux"] - out["Diamants actifs"]).astype(int)
-    out = pd.concat([out, commission, g_bon.astype(int)], axis=1).fillna(0)
-    out["Récompense totale agent"] = (out["Commission"] + out["Bonus agent"]).astype(int)
-
-    out = out.reset_index().rename(columns={CANON["agent"]: "Agent"}) \
-             .sort_values(["Diamants actifs", "Diamants totaux"], ascending=False) \
-             .reset_index(drop=True)
-    return out
-
-
-def compute_managers_table_from_creators(crea_table: pd.DataFrame) -> pd.DataFrame:
-    active_mask = crea_table["Actif"].eq("Validé")
-
-    per_creator = (
-        crea_table.loc[active_mask, [CANON["group"], CANON["username"], "Palier bonus (1/2/3)", CANON["diamonds"]]]
-        .groupby([CANON["group"], CANON["username"]], as_index=False)
-        .agg({"Palier bonus (1/2/3)": "max", CANON["diamonds"]: "sum"})
-        .rename(columns={CANON["diamonds"]: "Diamants actifs (créa)"})
-    )
-
-    per_creator["Bonus manager (créa)"] = np.select(
-        [
-            per_creator["Palier bonus (1/2/3)"].eq(3),
-            per_creator["Palier bonus (1/2/3)"].eq(2),
-        ],
-        [BONUS_MANAGER[3], BONUS_MANAGER[2]],
-        default=0
-    )
-
-    g_all = crea_table.groupby(CANON["group"], dropna=False)[CANON["diamonds"]].sum().rename("Diamants totaux")
-    g_act = per_creator.groupby(CANON["group"], dropna=False)["Diamants actifs (créa)"].sum().rename("Diamants actifs")
-    g_bon = per_creator.groupby(CANON["group"], dropna=False)["Bonus manager (créa)"].sum().rename("Bonus manager")
-
-    def _mgr_comm(x: int) -> int:
-        if x < 200_000: return 0
-        if x < 4_000_000: return round(x * 0.02)
-        return round(x * 0.03)
-
-    commission = g_act.apply(_mgr_comm).rename("Commission").astype(int)
-
-    out = pd.concat([g_act.astype(int), g_all.astype(int)], axis=1)
-    out["Pertes"] = (out["Diamants totaux"] - out["Diamants actifs"]).astype(int)
-    out = pd.concat([out, commission, g_bon.astype(int)], axis=1).fillna(0)
-    out["Récompense totale manager"] = (out["Commission"] + out["Bonus manager"]).astype(int)
-
-    out = out.reset_index().rename(columns={CANON["group"]: "Manager/Groupe"}) \
-             .sort_values(["Diamants actifs", "Diamants totaux"], ascending=False) \
-             .reset_index(drop=True)
+    # 9) Tri (optionnel) : par diamants décroissant
+    out = out.sort_values(["diamants", "username"], ascending=[False, True]).reset_index(drop=True)
     return out
