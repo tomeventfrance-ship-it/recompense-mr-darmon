@@ -1,4 +1,5 @@
-import io, re, yaml
+import io, re
+from math import floor
 from typing import Optional
 import pandas as pd
 import streamlit as st
@@ -6,15 +7,18 @@ from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
+import yaml
 
 st.set_page_config(page_title="Récompenses TCE", layout="wide")
 
+# ---------- I/O helpers ----------
 @st.cache_data(show_spinner=False)
-def read_any(file) -> pd.DataFrame:
-    name = file.name.lower()
-    if name.endswith((".xlsx", ".xls")):
-        return pd.read_excel(file)
-    return pd.read_csv(file)
+def read_any(file_bytes: bytes, name: str) -> pd.DataFrame:
+    n = name.lower()
+    bio = io.BytesIO(file_bytes)
+    if n.endswith((".xlsx", ".xls")):
+        return pd.read_excel(bio)
+    return pd.read_csv(bio)
 
 def to_numeric_safe(x):
     if pd.isna(x):
@@ -33,19 +37,19 @@ def parse_duration_to_hours(x) -> float:
         return float(s.replace(",", "."))
     except Exception:
         pass
-    import re as _re
-    if _re.match(r"^\d{1,2}:\d{1,2}(:\d{1,2})?$", s):
-        parts = [int(p) for p in s.split(":")]
-        h = parts[0]; m = parts[1] if len(parts)>1 else 0; sec = parts[2] if len(parts)>2 else 0
+    if re.match(r"^\d{1,2}:\d{1,2}(:\d{1,2})?$", s):
+        h, m, *rest = [int(p) for p in s.split(":")]
+        sec = rest[0] if rest else 0
         return h + m/60 + sec/3600
-    h = _re.search(r"(\d+)\s*h", s); m = _re.search(r"(\d+)\s*m", s)
+    h = re.search(r"(\d+)\s*h", s); m = re.search(r"(\d+)\s*m", s)
     if h or m:
         hh = int(h.group(1)) if h else 0; mm = int(m.group(1)) if m else 0
         return hh + mm/60
-    mm = _re.search(r"(\d+)\s*min", s)
+    mm = re.search(r"(\d+)\s*min", s)
     if mm: return int(mm.group(1))/60
     return 0.0
 
+# ---------- Normalisation ----------
 COLS = {
     "periode": "Période des données",
     "creator_username": "Nom d'utilisateur du/de la créateur(trice)",
@@ -73,6 +77,7 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
         out[c] = out[c].astype(str)
     return out
 
+# ---------- Règles ----------
 DEFAULT_CFG = {
     "activation": {
         "beginner": {"days": 7, "hours": 15},
@@ -170,6 +175,7 @@ def beginner_bonus(row, ctype, cfg, hist):
             return float(m["bonus"]), m["code"]
     return 0.0, ""
 
+# ---------- Créateurs ----------
 def compute_creators(df_norm, hist_norm, cfg):
     rows = []
     thr = cfg.get("confirmed_threshold_diamants",150000)
@@ -184,7 +190,7 @@ def compute_creators(df_norm, hist_norm, cfg):
 
         p2_val = select_fixed_reward(amount, P2_TABLE) if (requires_second and ok2) else 0.0
         if requires_second and ok2:
-            p1_val = 0.0
+            p1_val = 0.0  # P2 annule P1
 
         bval, bcode = beginner_bonus(row, ctype, cfg, hist_norm)
         eligible = (p1_val>0) or (p2_val>0)
@@ -192,6 +198,9 @@ def compute_creators(df_norm, hist_norm, cfg):
         reason = "" if eligible else (why if why else ("Second palier non validé (20j/80h)" if requires_second and not ok2 else ""))
 
         total = p1_val + p2_val + bval
+        if amount >= 2_000_000:
+            total = float(floor(total / 1000) * 1000)  # arrondi au millier inférieur
+
         rows.append({
             "creator_id": row["creator_id"],
             "creator_username": row["creator_username"],
@@ -212,6 +221,7 @@ def compute_creators(df_norm, hist_norm, cfg):
         })
     return pd.DataFrame(rows)
 
+# ---------- Agents / Managers (mois courant seul) ----------
 def totals_active_by(group_field: str, creators_df: Optional[pd.DataFrame]) -> pd.DataFrame:
     if creators_df is None or creators_df.empty:
         return pd.DataFrame(columns=[group_field, "diamants_actifs"])
@@ -257,6 +267,7 @@ def compute_managers(crea_cur):
     out["prime_manager"] = out["base_prime"] + out["bonus_additionnel"]
     return out[["groupe","diamants_mois","base_prime","bonus_additionnel","prime_manager"]].sort_values("prime_manager", ascending=False)
 
+# ---------- PDF ----------
 def make_pdf(title: str, df: pd.DataFrame) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=18, rightMargin=18, topMargin=18, bottomMargin=18)
@@ -287,6 +298,7 @@ def safe_pdf_button(label, title, df, filename):
         pdf_bytes = make_pdf(title, df)
         st.download_button(label, pdf_bytes, filename, "application/pdf")
 
+# ---------- UI ----------
 st.title("Logiciel Récompense Tom Consulting & Event")
 st.caption("3 onglets indépendants • Base créateurs unique • Exports CSV & PDF")
 
@@ -298,18 +310,22 @@ with col2:
 with col3:
     f_yaml = st.file_uploader("Seuils d’activité (YAML) — optionnel", type=["yml","yaml"], key="yaml")
 
+# Bouton de purge cache
+if st.button("Forcer relecture des fichiers"):
+    st.cache_data.clear()
+    st.rerun()
+
 cfg = DEFAULT_CFG.copy()
 if f_yaml is not None:
     try:
-        import yaml as _yaml
-        cfg.update(_yaml.safe_load(f_yaml.read()) or {})
+        cfg.update(yaml.safe_load(f_yaml.read()) or {})
     except Exception:
         st.warning("YAML invalide. Seuils par défaut utilisés.")
 
 if f_current is not None:
-    raw_cur = read_any(f_current)
+    raw_cur = read_any(f_current.getvalue(), f_current.name)
     norm_cur = normalize(raw_cur)
-    hist_norm = normalize(read_any(f_previous)) if f_previous is not None else pd.DataFrame()
+    hist_norm = normalize(read_any(f_previous.getvalue(), f_previous.name)) if f_previous is not None else pd.DataFrame()
 
     tab_crea, tab_agents, tab_managers = st.tabs(["Créateurs", "Agents", "Managers"])
 
