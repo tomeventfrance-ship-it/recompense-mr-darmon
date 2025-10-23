@@ -103,7 +103,6 @@ P1_TABLE = [
     (1500000, 1999999, 44999),
     (2000000, None, 'PCT4')
 ]
-
 P2_TABLE = [
     (35000, 74999, 1000),
     (75000, 149999, 2500),
@@ -203,3 +202,145 @@ def compute_creators(df_norm, hist_norm, cfg):
             'total_createur': total
         })
     return pd.DataFrame(rows)
+
+def totals_active_by(group_field: str, creators_df: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if creators_df is None or creators_df.empty:
+        return pd.DataFrame(columns=[group_field, 'diamants_actifs'])
+    base = creators_df[creators_df['etat_activite'].eq('✅ Actif')]
+    grp = base.groupby(group_field, dropna=False)['diamants'].sum().reset_index()
+    grp.rename(columns={'diamants':'diamants_actifs'}, inplace=True)
+    return grp
+
+def percent_reward(total: float) -> float:
+    if total >= 4000000: return total * 0.03
+    if total >= 200000: return total * 0.02
+    return 0.0
+
+def agent_manager_bonus(crea_df: pd.DataFrame, group_field: str, b2_amt: float, b3_amt: float) -> pd.DataFrame:
+    if crea_df is None or crea_df.empty:
+        return pd.DataFrame(columns=[group_field,'bonus_additionnel'])
+    tmp = crea_df.copy()
+    tmp['b2'] = (tmp['bonus_code']=='B2').astype(int)
+    tmp['b3'] = (tmp['bonus_code']=='B3').astype(int)
+    agg = tmp.groupby(group_field)[['b2','b3']].sum().reset_index()
+    agg['bonus_additionnel'] = agg['b2']*b2_amt + agg['b3']*b3_amt
+    return agg[[group_field,'bonus_additionnel']]
+
+def compute_agents(crea_cur, crea_prev):
+    curr = totals_active_by('agent', crea_cur)
+    prev = totals_active_by('agent', crea_prev)
+    df = curr.rename(columns={'diamants_actifs':'diamants_mois'}).copy()
+    df['diamants_mois_prec'] = 0.0
+    if not prev.empty:
+        df = df.merge(prev.rename(columns={'diamants_actifs':'diamants_mois_prec'}),
+                      on='agent', how='left').fillna({'diamants_mois_prec':0})
+    def total_ref(r):
+        return r['diamants_mois'] + r['diamants_mois_prec'] if r['diamants_mois_prec'] < 200000 else r['diamants_mois']
+    df['total_reference'] = df.apply(total_ref, axis=1)
+    df['base_prime'] = df['total_reference'].apply(percent_reward)
+    b = agent_manager_bonus(crea_cur, 'agent', 1000, 15000)
+    out = df.merge(b, on='agent', how='left').fillna({'bonus_additionnel':0})
+    out['prime_agent'] = out['base_prime'] + out['bonus_additionnel']
+    return out[['agent','diamants_mois_prec','diamants_mois','total_reference','base_prime','bonus_additionnel','prime_agent']]\
+             .sort_values('prime_agent', ascending=False)
+
+def compute_managers(crea_cur, crea_prev):
+    curr = totals_active_by('groupe', crea_cur)
+    prev = totals_active_by('groupe', crea_prev)
+    df = curr.rename(columns={'diamants_actifs':'diamants_mois'}).copy()
+    df['diamants_mois_prec'] = 0.0
+    if not prev.empty:
+        df = df.merge(prev.rename(columns={'diamants_actifs':'diamants_mois_prec'}),
+                      on='groupe', how='left').fillna({'diamants_mois_prec':0})
+    def total_ref(r):
+        return r['diamants_mois'] + r['diamants_mois_prec'] if r['diamants_mois_prec'] < 200000 else r['diamants_mois']
+    df['total_reference'] = df.apply(total_ref, axis=1)
+    df['base_prime'] = df['total_reference'].apply(percent_reward)
+    b = agent_manager_bonus(crea_cur, 'groupe', 1000, 5000)
+    out = df.merge(b, on='groupe', how='left').fillna({'bonus_additionnel':0})
+    out['prime_manager'] = out['base_prime'] + out['bonus_additionnel']
+    return out[['groupe','diamants_mois_prec','diamants_mois','total_reference','base_prime','bonus_additionnel','prime_manager']]\
+             .sort_values('prime_manager', ascending=False)
+
+def make_pdf(title: str, df: pd.DataFrame) -> bytes:
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=18, rightMargin=18, topMargin=18, bottomMargin=18)
+    styles = getSampleStyleSheet()
+    elements = [Paragraph(title, styles['Title']), Spacer(1, 12)]
+    headers = list(df.columns)
+    data = [headers] + df.astype(str).values.tolist()
+    table = Table(data, repeatRows=1)
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.black),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0,0), (-1,0), 9),
+        ('FONTSIZE', (0,1), (-1,-1), 8),
+        ('GRID', (0,0), (-1,-1), 0.25, colors.grey),
+        ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.whitesmoke, colors.lightgrey])
+    ]))
+    elements.append(table)
+    doc.build(elements)
+    buf.seek(0)
+    return buf.read()
+
+st.title('Logiciel Récompense Tom Consulting & Event')
+st.caption('3 onglets • Base créateurs unique • Exports CSV & PDF')
+
+col1, col2, col3 = st.columns(3)
+with col1:
+    f_current = st.file_uploader('Mois courant (XLSX/CSV)', type=['xlsx','xls','csv'], key='cur')
+with col2:
+    f_previous = st.file_uploader('Mois précédent (pour cumuls)', type=['xlsx','xls','csv'], key='prev')
+with col3:
+    f_yaml = st.file_uploader("Seuils d’activité (YAML) — optionnel", type=['yml','yaml'], key='yaml')
+
+cfg = DEFAULT_CFG.copy()
+if f_yaml is not None:
+    try:
+        cfg.update(yaml.safe_load(f_yaml.read()) or {})
+    except Exception:
+        st.warning('YAML invalide. Seuils par défaut utilisés.')
+
+if f_current is not None:
+    raw_cur = read_any(f_current); norm_cur = normalize(raw_cur)
+    norm_prev = None
+    if f_previous is not None:
+        raw_prev = read_any(f_previous); norm_prev = normalize(raw_prev)
+
+    tab_crea, tab_agents, tab_managers = st.tabs(['Créateurs', 'Agents', 'Managers'])
+
+    with tab_crea:
+        crea_df = compute_creators(norm_cur, norm_prev, cfg)
+        st.subheader('Tableau créateurs')
+        st.dataframe(crea_df, use_container_width=True)
+        st.download_button('CSV Créateurs', crea_df.to_csv(index=False).encode('utf-8'),
+                           'recompenses_createurs.csv', 'text/csv')
+        cols_pdf = ['creator_username','groupe','agent','periode','diamants',
+                    'jours_live','heures_live','type_createur','etat_activite',
+                    'recompense_palier_1','recompense_palier_2','bonus_debutant','total_createur']
+        pdf_bytes = make_pdf('Récompenses Créateurs', crea_df[cols_pdf])
+        st.download_button('PDF Créateurs', pdf_bytes, 'recompenses_createurs.pdf', 'application/pdf')
+
+    with tab_agents:
+        prev_crea = compute_creators(norm_prev, None, cfg) if norm_prev is not None else None
+        agents_df = compute_agents(crea_df, prev_crea)
+        st.subheader('Tableau agents')
+        st.dataframe(agents_df, use_container_width=True)
+        st.download_button('CSV Agents', agents_df.to_csv(index=False).encode('utf-8'),
+                           'recompenses_agents.csv', 'text/csv')
+        pdf_bytes = make_pdf('Récompenses Agents', agents_df)
+        st.download_button('PDF Agents', pdf_bytes, 'recompenses_agents.pdf', 'application/pdf')
+
+    with tab_managers:
+        prev_crea = compute_creators(norm_prev, None, cfg) if norm_prev is not None else None
+        man_df = compute_managers(crea_df, prev_crea)
+        st.subheader('Tableau managers')
+        st.dataframe(man_df, use_container_width=True)
+        st.download_button('CSV Managers', man_df.to_csv(index=False).encode('utf-8'),
+                           'recompenses_managers.csv', 'text/csv')
+        pdf_bytes = make_pdf('Récompenses Managers', man_df)
+        st.download_button('PDF Managers', pdf_bytes, 'recompenses_managers.pdf', 'application/pdf')
+else:
+    st.info('Charge le mois courant pour commencer.')
