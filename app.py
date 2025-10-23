@@ -187,19 +187,34 @@ def beginner_bonus(row, ctype, cfg, hist):
 # --------------------------------------------------------
 def compute_creators(df_norm, hist_norm, cfg):
     rows = []
-    thr = cfg["confirmed_threshold_diamants"]
+    thr = cfg.get("confirmed_threshold_diamants",150000)
     for _, row in df_norm.iterrows():
         ctype = creator_type(row, hist_norm, cfg)
         ok1, ok2, why = activity_ok(row, ctype, cfg)
         amount = float(row["diamants"])
+
         requires_second = amount >= thr
-        eligible = ok1 and (ok2 if requires_second else True)
-        table = P2_TABLE if ok2 else P1_TABLE
-        reward = select_fixed_reward(amount, table) if eligible else 0.0
+        eligible_p1 = ok1 and (not requires_second or (requires_second and not ok2))
+        eligible_p2 = ok2 and (ok1 or ctype in ["Confirmé","confirmé","débutant","Débutant"])  # ok2 implique ok1 de fait
+
+        # montants bruts par palier
+        p1_val = select_fixed_reward(amount, P1_TABLE) if eligible_p1 else 0.0
+        p2_val = select_fixed_reward(amount, P2_TABLE) if (requires_second and ok2) else 0.0
+
+        # si palier 2 validé, palier 1 s'annule (reste 0)
+        if requires_second and ok2:
+            p1_val = 0.0
+
+        # bonus débutant
         bval, bcode = beginner_bonus(row, ctype, cfg, hist_norm)
-        total = reward + bval
+
+        # éligibilité globale = au moins un des deux paliers actif
+        eligible = (p1_val>0) or (p2_val>0)
         etat = "✅ Actif" if eligible else "⚠️ Inactif"
         reason = "" if eligible else (why if why else ("Second palier non validé (20j/80h)" if requires_second and not ok2 else ""))
+
+        total = p1_val + p2_val + bval
+
         rows.append({
             "creator_id": row["creator_id"],
             "creator_username": row["creator_username"],
@@ -210,10 +225,10 @@ def compute_creators(df_norm, hist_norm, cfg):
             "jours_live": int(row["jours_live"]),
             "heures_live": float(row["heures_live"]),
             "type_createur": ctype.capitalize(),
-            "palier": "Palier 2" if ok2 else "Palier 1",
             "etat_activite": etat,
             "raison_ineligibilite": reason,
-            "reward_createur": reward,
+            "recompense_palier_1": p1_val,
+            "recompense_palier_2": p2_val,
             "bonus_debutant": bval,
             "bonus_code": bcode,
             "total_createur": total
@@ -256,24 +271,54 @@ def agent_manager_bonus(crea_df, group_field, b2_amt, b3_amt):
     return agg[[group_field,"bonus_additionnel"]]
 
 def compute_agents(crea_cur, crea_prev):
-    curr = totals_active_by("agent", crea_cur)
+    curr = totals_active_by("agent", crea_cur)              # diamants_mois
     prev = totals_active_by("agent", crea_prev) if crea_prev is not None else None
-    merged = cumulative_two_months(curr, prev, "agent")
-    merged["base_prime"] = merged.apply(lambda r: percent_reward(r["diamants_mois"] if r["diamants_mois"]>=200000 else r["diamants_cumules"]), axis=1)
+
+    df = curr.rename(columns={"diamants_actifs":"diamants_mois"}).copy()
+    df["diamants_mois_prec"] = 0.0
+    if prev is not None and not prev.empty:
+        df = df.merge(prev.rename(columns={"diamants_actifs":"diamants_mois_prec"}),
+                      on="agent", how="left").fillna({"diamants_mois_prec":0})
+
+    # règle: on cumule N-1 + N SEULEMENT si N-1 < 200k
+    def base_total(r):
+        if r["diamants_mois_prec"] < 200000:
+            return r["diamants_mois_prec"] + r["diamants_mois"]
+        return r["diamants_mois"]  # pas de cumul si N-1 >= 200k
+
+    df["total_reference"] = df.apply(base_total, axis=1)
+    df["base_prime"] = df["total_reference"].apply(percent_reward)
+
+    # bonus additionnels via B2/B3
     b = agent_manager_bonus(crea_cur, "agent", 1000, 15000)
-    out = pd.merge(merged, b, on="agent", how="left").fillna({"bonus_additionnel":0})
+    out = df.merge(b, on="agent", how="left").fillna({"bonus_additionnel":0})
     out["prime_agent"] = out["base_prime"] + out["bonus_additionnel"]
-    return out.sort_values("prime_agent", ascending=False)
+    return out[["agent","diamants_mois_prec","diamants_mois","total_reference","base_prime","bonus_additionnel","prime_agent"]]\
+             .sort_values("prime_agent", ascending=False)
 
 def compute_managers(crea_cur, crea_prev):
     curr = totals_active_by("groupe", crea_cur)
     prev = totals_active_by("groupe", crea_prev) if crea_prev is not None else None
-    merged = cumulative_two_months(curr, prev, "groupe")
-    merged["base_prime"] = merged.apply(lambda r: percent_reward(r["diamants_mois"] if r["diamants_mois"]>=200000 else r["diamants_cumules"]), axis=1)
+
+    df = curr.rename(columns={"diamants_actifs":"diamants_mois"}).copy()
+    df["diamants_mois_prec"] = 0.0
+    if prev is not None and not prev.empty:
+        df = df.merge(prev.rename(columns={"diamants_actifs":"diamants_mois_prec"}),
+                      on="groupe", how="left").fillna({"diamants_mois_prec":0})
+
+    def base_total(r):
+        if r["diamants_mois_prec"] < 200000:
+            return r["diamants_mois_prec"] + r["diamants_mois"]
+        return r["diamants_mois"]
+
+    df["total_reference"] = df.apply(base_total, axis=1)
+    df["base_prime"] = df["total_reference"].apply(percent_reward)
+
     b = agent_manager_bonus(crea_cur, "groupe", 1000, 5000)
-    out = pd.merge(merged, b, on="groupe", how="left").fillna({"bonus_additionnel":0})
+    out = df.merge(b, on="groupe", how="left").fillna({"bonus_additionnel":0})
     out["prime_manager"] = out["base_prime"] + out["bonus_additionnel"]
-    return out.sort_values("prime_manager", ascending=False)
+    return out[["groupe","diamants_mois_prec","diamants_mois","total_reference","base_prime","bonus_additionnel","prime_manager"]]\
+             .sort_values("prime_manager", ascending=False)
 
 # --------------------------------------------------------
 # PDF
@@ -336,9 +381,9 @@ if f_current is not None:
         st.dataframe(crea_df, use_container_width=True)
         st.download_button("CSV Créateurs", crea_df.to_csv(index=False).encode("utf-8"),
                            "recompenses_createurs.csv", "text/csv")
-        cols_pdf = ["creator_username","groupe","agent","periode","diamants","jours_live",
-                    "heures_live","type_createur","palier","etat_activite","reward_createur",
-                    "bonus_debutant","total_createur"]
+       cols_pdf = ["creator_username","groupe","agent","periode","diamants",
+            "jours_live","heures_live","type_createur","etat_activite",
+            "recompense_palier_1","recompense_palier_2","bonus_debutant","total_createur"]
         pdf_bytes = make_pdf("Récompenses Créateurs", crea_df[cols_pdf])
         st.download_button("PDF Créateurs", pdf_bytes, "recompenses_createurs.pdf", "application/pdf")
 
