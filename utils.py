@@ -1,185 +1,247 @@
-# app.py
-import io
-import traceback
+# utils.py
 import pandas as pd
-import streamlit as st
+import numpy as np
+from datetime import datetime
 
-# ---- Fonctions fournies par utils.py (ne rien changer ici) ----
-from utils import (
-    ensure_df,
-    normalize_source,
-    compute_creators_table,
-    compute_agents_table,
-    compute_managers_table,
-)
+# ============== CONFIG COLONNES (mapping strict + alias souple) ==============
+CANON = {
+    "period": "Période des données",                          # A
+    "username": "Nom d’utilisateur du/de la créateur(trice)", # C
+    "group": "Groupe",                                        # D
+    "agent": "Agent",                                         # E
+    "relation_date": "Date d’établissement de la relation",   # F
+    "diamonds": "Diamants",                                   # H
+    "live_hours": "Durée de LIVE",                            # I
+    "live_days": "Jours de passage en LIVE valides",          # J
+    "al_status": "Statut du diplôme",                         # AL
+}
 
-st.set_page_config(
-    page_title="Récompenses – Créateurs / Agents / Managers",
-    page_icon="💎",
-    layout="wide",
-)
+ALIASES = {
+    "Période des données": [
+        "période des données","periode des donnees","période","periode","période données","période data"
+    ],
+    "Nom d’utilisateur du/de la créateur(trice)": [
+        "nom d’utilisateur","nom utilisateur","username","créateur","createur",
+        "nom du createur","nom du créateur","nom d'utilisateur du/de la créateur(trice)"
+    ],
+    "Groupe": ["groupe/manager","groupe manager","manager","groupe"],
+    "Agent": ["agent(e)","nom de l’agent","nom agent","agent"],
+    "Date d’établissement de la relation": [
+        "date etablissement de la relation","date relation","relation date",
+        "date d’etablissement de la relation","date d'établissement de la relation"
+    ],
+    "Diamants": ["diamant","total diamants","total_diamonds","diamonds"],
+    "Durée de LIVE": [
+        "durée de live","duree de live","heures de live","duree_live","live hours",
+        "durée de live (heures)","durée live","durée"
+    ],
+    "Jours de passage en LIVE valides": [
+        "jours de passage en live","jours live","nb jours live","live_days","jours actifs"
+    ],
+    "Statut du diplôme": ["statut diplôme","diplome","al","niveau","status diplôme"],
+}
+NUMERIC_COLS = {"Diamants","Durée de LIVE","Jours de passage en LIVE valides"}
 
-# ------------------ Helpers locaux (lecture fichiers) ------------------
-def read_any_uploaded(file) -> pd.DataFrame:
-    """
-    Lit un fichier Streamlit (xlsx/xls/csv) -> DataFrame Pandas.
-    Renvoie un DataFrame vide si format non reconnu.
-    """
-    name = (file.name or "").lower()
-    data = file.read()
-    bio = io.BytesIO(data)
+# ======================= NORMALISATION DES COLONNES ==========================
+def _match_target(col, target):
+    if str(col).strip().casefold() == target.strip().casefold():
+        return True
+    for alias in ALIASES.get(target, []):
+        if str(col).strip().casefold() == alias.strip().casefold():
+            return True
+    return False
 
-    try:
-        if name.endswith(".xlsx") or name.endswith(".xls"):
-            df = pd.read_excel(bio)
-        elif name.endswith(".csv"):
-            # sep=None + engine='python' auto-détecte le séparateur (',' ';' '\t'…)
-            df = pd.read_csv(io.BytesIO(data), sep=None, engine="python")
-        else:
-            return pd.DataFrame()
-        return df
-    except Exception:
-        # Affiche l’erreur mais renvoie DF vide pour ne pas casser l’app
-        st.error("Erreur de lecture du fichier :\n" + traceback.format_exc())
+def normalize_source(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
         return pd.DataFrame()
+    # rename souple -> noms finaux FR
+    new_cols = {}
+    for col in df.columns:
+        matched = None
+        for wanted in CANON.values():
+            if _match_target(col, wanted):
+                matched = wanted; break
+        new_cols[col] = matched if matched else col
+    df = df.rename(columns=new_cols)
 
-def concat_normalized(dfs):
-    """Concatène une liste de DataFrames après normalisation des colonnes."""
-    clean = []
-    for d in dfs:
-        if d is None or d.empty:
-            continue
-        # ensure_df pour robustesse (types/NA), puis normalisation des noms
-        d = ensure_df(d)
-        d = normalize_source(d)
-        if not d.empty:
-            clean.append(d)
-    if not clean:
-        return None
-    return pd.concat(clean, ignore_index=True)
+    # ne garder QUE A,C,D,E,F,H,I,J,AL
+    keep = list(CANON.values())
+    present = [c for c in keep if c in df.columns]
+    df = df[present].copy()
 
-def download_csv_button(df: pd.DataFrame, label: str, filename: str):
-    csv = df.to_csv(index=False).encode("utf-8")
-    st.download_button(label=label, data=csv, file_name=filename, mime="text/csv")
+    # types
+    if "Période des données" in df.columns:
+        df["Période des données"] = df["Période des données"].astype(str)
 
-# ----------------------------- UI -------------------------------------
-st.title("💎 Récompenses – Créateurs / Agents / Managers")
-
-st.markdown(
-    "Importez **un ou plusieurs** fichiers **.xlsx/.xls/.csv** (mois courant + historiques). "
-    "Aucune mémorisation cachée : ce que vous importez ici est ce qui est utilisé dans les calculs."
-)
-
-with st.container():
-    colU, colH = st.columns([3, 3], gap="large")
-
-    with colU:
-        uploaded_files = st.file_uploader(
-            "Données du·de la créateur(trice) (mois courant) – formats acceptés : XLSX, XLS, CSV",
-            type=["xlsx", "xls", "csv"],
-            accept_multiple_files=True,
+    if "Date d’établissement de la relation" in df.columns:
+        df["Date d’établissement de la relation"] = pd.to_datetime(
+            df["Date d’établissement de la relation"], errors="coerce"
         )
 
-    with colH:
-        history_files = st.file_uploader(
-            "Historique (optionnel) – bonus débutant déjà payés & créateurs confirmés (≥150k)",
-            type=["xlsx", "xls", "csv"],
-            accept_multiple_files=True,
+    for c in NUMERIC_COLS:
+        if c in df.columns:
+            df[c] = (
+                df[c].astype(str)
+                .str.replace("\u00a0","",regex=False)
+                .str.replace(" ","",regex=False)
+                .str.replace(",",".",regex=False)
+            )
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+    if "Nom d’utilisateur du/de la créateur(trice)" in df.columns:
+        df["Nom d’utilisateur du/de la créateur(trice)"] = (
+            df["Nom d’utilisateur du/de la créateur(trice)"].astype(str).str.strip()
         )
+    return df
 
-    # Aperçu brut (colonnes source)
-    show_sample = st.toggle("Voir un échantillon brut", value=False)
+def ensure_df(obj) -> pd.DataFrame:
+    if obj is None: return pd.DataFrame()
+    if isinstance(obj, tuple): obj = obj[0]
+    if isinstance(obj, pd.DataFrame): return obj
+    try: return pd.DataFrame(obj)
+    except: return pd.DataFrame()
 
-# --------------------- Chargement + Normalisation ----------------------
-df_current = None
-df_history = None
+# ====================== REGLES D’ACTIVITE & BONUS ============================
+THRESH_BEGINNER = (7, 15)     # jours, heures
+THRESH_CONFIRMED = (12, 25)
+THRESH_SECOND = (20, 80)      # requis si ≥150k
 
-try:
-    dfs_cur = []
-    if uploaded_files:
-        for f in uploaded_files:
-            df = read_any_uploaded(f)
-            dfs_cur.append(df)
-    df_current = concat_normalized(dfs_cur)
+BONUS_RULES = [
+    (500_000, 3000, "B3_500k"),
+    (150_000, 1088, "B2_150k"),
+    (75_000,   500, "B1_75k"),
+]
 
-    dfs_hist = []
-    if history_files:
-        for f in history_files:
-            df = read_any_uploaded(f)
-            dfs_hist.append(df)
-    df_history = concat_normalized(dfs_hist)
+def _is_confirmed(username: str, df_hist: pd.DataFrame, cur_diamonds: float) -> bool:
+    if df_hist is not None and not df_hist.empty:
+        h = df_hist
+        if "Nom d’utilisateur du/de la créateur(trice)" in h.columns and "Diamants" in h.columns:
+            mask = h["Nom d’utilisateur du/de la créateur(trice)"].astype(str).str.strip() == username.strip()
+            if mask.any():
+                if h.loc[mask, "Diamants"].max(skipna=True) >= 150_000:
+                    return True
+    return cur_diamonds >= 150_000
 
-    # Bandeau d'état d'import
-    nb_rows = 0 if df_current is None else len(df_current)
-    st.success(f"Fichier(s) importé(s) : **{len(uploaded_files or [])}** • Lignes totales : **{nb_rows}**")
+def _active_flags(is_conf: bool, days: float, hours: float, diamonds: float):
+    if is_conf:
+        j, h = THRESH_CONFIRMED; pal = "1er confirmé"
+    else:
+        j, h = THRESH_BEGINNER;  pal = "1er"
+    actif = (days >= j) and (hours >= h)
+    second_ok = (days >= THRESH_SECOND[0]) and (hours >= THRESH_SECOND[1]) and (diamonds >= 150_000)
+    return pal, actif, second_ok
 
-    if show_sample:
-        st.caption("Aperçu des colonnes (après normalisation) – 5 premières lignes")
-        if df_current is not None and not df_current.empty:
-            st.dataframe(df_current.head(5), use_container_width=True)
+def _beginner_bonus(username, diamonds, relation_date, is_conf, df_hist):
+    if is_conf: return 0, ""
+    if pd.isna(relation_date): return 0, ""
+    days_since = (pd.Timestamp.utcnow().normalize() - relation_date.normalize()).days
+    if days_since > 90: return 0, ""
+    for thr, amount, code in BONUS_RULES:
+        if diamonds >= thr:
+            return amount, code
+    return 0, ""
+
+# ============================ TABLES CALCULEES ===============================
+def _base_check(df: pd.DataFrame) -> pd.DataFrame:
+    req = [
+        "Période des données",
+        "Nom d’utilisateur du/de la créateur(trice)",
+        "Groupe",
+        "Agent",
+        "Date d’établissement de la relation",
+        "Diamants",
+        "Durée de LIVE",
+        "Jours de passage en LIVE valides",
+        "Statut du diplôme",
+    ]
+    missing = [c for c in req if c not in df.columns]
+    if missing:
+        raise ValueError("Colonnes manquantes : " + ", ".join(missing))
+    return df.copy()
+
+def compute_creators_table(df_current: pd.DataFrame, df_history: pd.DataFrame | None = None) -> pd.DataFrame:
+    df = _base_check(df_current)
+    df = df.sort_values(["Période des données","Nom d’utilisateur du/de la créateur(trice)"], na_position="last")
+
+    rows = []
+    for _, r in df.iterrows():
+        user = str(r["Nom d’utilisateur du/de la créateur(trice)"]).strip()
+        diamonds = float(r["Diamants"])
+        days = float(r["Jours de passage en LIVE valides"])
+        hours = float(r["Durée de LIVE"])
+
+        is_conf = _is_confirmed(user, df_history, diamonds)
+        pal_act, actif, second_ok = _active_flags(is_conf, days, hours, diamonds)
+
+        if diamonds >= 150_000 and second_ok:
+            palier_affiche = "Palier 2"
+            recomp_p1 = 0
+            recomp_p2 = diamonds
         else:
-            st.info("Aucune donnée importée pour le mois courant.")
-        if df_history is not None and not df_history.empty:
-            st.caption("Historique – 5 premières lignes")
-            st.dataframe(df_history.head(5), use_container_width=True)
+            palier_affiche = "Palier 1"
+            recomp_p1 = diamonds if (actif and diamonds < 150_000) else 0
+            recomp_p2 = 0
 
-except Exception:
-    st.error("Erreur lors du traitement d'import :\n" + traceback.format_exc())
+        bonus_amt, bonus_code = _beginner_bonus(
+            user, diamonds, r["Date d’établissement de la relation"], is_conf, df_history
+        )
 
-# ---------------------------- Navigation ------------------------------
-st.sidebar.header("Navigation")
-page = st.sidebar.radio("Aller à :", options=["Créateurs", "Agents", "Managers"], index=0)
+        rows.append({
+            "Période": r["Période des données"],
+            "Nom d’utilisateur": user,
+            "Groupe/Manager": r["Groupe"],
+            "Agent": r["Agent"],
+            "Date relation": r["Date d’établissement de la relation"],
+            "Diamants": int(diamonds),
+            "Jours actifs": int(days),
+            "Heures de live": float(hours),
+            "Type de créateur": "Confirmé" if is_conf else "Débutant",
+            "Palier d’activité": pal_act,
+            "Actif": "✅" if actif else "⚠️",
+            "Palier affiché": palier_affiche,
+            "Récompense palier 1": int(recomp_p1),
+            "Récompense palier 2": int(recomp_p2),
+            "Bonus débutant (diamants)": int(bonus_amt),
+            "Code bonus": bonus_code,
+        })
+    out = pd.DataFrame(rows)
+    order = [
+        "Période","Nom d’utilisateur","Groupe/Manager","Agent","Date relation",
+        "Diamants","Jours actifs","Heures de live",
+        "Type de créateur","Palier d’activité","Actif",
+        "Palier affiché","Récompense palier 1","Récompense palier 2",
+        "Bonus débutant (diamants)","Code bonus",
+    ]
+    return out[order]
 
-# ---------------------------- Pages -----------------------------------
-if page == "Créateurs":
-    st.subheader("Créateurs")
-    if df_current is None or df_current.empty:
-        st.warning("Importez au moins un fichier pour démarrer.")
-    else:
-        try:
-            table_crea = compute_creators_table(df_current, df_history)
-            if table_crea is None or table_crea.empty:
-                st.info("Aucune donnée exploitable.")
-            else:
-                st.dataframe(table_crea, use_container_width=True, height=480)
-                colA, colB = st.columns([1, 1])
-                with colA:
-                    download_csv_button(
-                        table_crea, "⬇️ Export CSV – Créateurs", "recompenses_createurs.csv"
-                    )
-        except Exception:
-            st.error("Erreur dans compute_creators_table(utils.py) :\n" + traceback.format_exc())
+def compute_agents_table(df_current: pd.DataFrame, df_history: pd.DataFrame | None = None) -> pd.DataFrame:
+    crea = compute_creators_table(df_current, df_history)
+    if crea.empty: return pd.DataFrame()
+    bonus_agent = np.where(crea["Diamants"] >= 500_000, 15000,
+                      np.where(crea["Diamants"] >= 150_000, 1000, 0))
+    tmp = crea.copy()
+    tmp["Bonus agent (diamants)"] = bonus_agent.astype(int)
+    agg = tmp.groupby(["Agent"], dropna=False, as_index=False).agg(
+        Créateurs_actifs=("Actif", lambda s: int((s=="✅").sum())),
+        Total_diamants=("Diamants","sum"),
+        Total_récompense_p1=("Récompense palier 1","sum"),
+        Total_récompense_p2=("Récompense palier 2","sum"),
+        Total_bonus_agent=("Bonus agent (diamants)","sum"),
+    )
+    return agg.sort_values("Total_diamants", ascending=False, na_position="last")
 
-elif page == "Agents":
-    st.subheader("Agents")
-    if df_current is None or df_current.empty:
-        st.warning("Importez au moins un fichier pour démarrer.")
-    else:
-        try:
-            table_agents = compute_agents_table(df_current, df_history)
-            if table_agents is None or table_agents.empty:
-                st.info("Aucune donnée exploitable.")
-            else:
-                st.dataframe(table_agents, use_container_width=True, height=480)
-                download_csv_button(
-                    table_agents, "⬇️ Export CSV – Agents", "recompenses_agents.csv"
-                )
-        except Exception:
-            st.error("Erreur dans compute_agents_table(utils.py) :\n" + traceback.format_exc())
-
-else:  # Managers
-    st.subheader("Managers")
-    if df_current is None or df_current.empty:
-        st.warning("Importez au moins un fichier pour démarrer.")
-    else:
-        try:
-            table_mgr = compute_managers_table(df_current, df_history)
-            if table_mgr is None or table_mgr.empty:
-                st.info("Aucune donnée exploitable.")
-            else:
-                st.dataframe(table_mgr, use_container_width=True, height=480)
-                download_csv_button(
-                    table_mgr, "⬇️ Export CSV – Managers", "recompenses_managers.csv"
-                )
-        except Exception:
-            st.error("Erreur dans compute_managers_table(utils.py) :\n" + traceback.format_exc())
+def compute_managers_table(df_current: pd.DataFrame, df_history: pd.DataFrame | None = None) -> pd.DataFrame:
+    crea = compute_creators_table(df_current, df_history)
+    if crea.empty: return pd.DataFrame()
+    bonus_mgr = np.where(crea["Diamants"] >= 500_000, 5000,
+                    np.where(crea["Diamants"] >= 150_000, 1000, 0))
+    tmp = crea.copy()
+    tmp["Bonus manager (diamants)"] = bonus_mgr.astype(int)
+    agg = tmp.groupby(["Groupe/Manager"], dropna=False, as_index=False).agg(
+        Créateurs_actifs=("Actif", lambda s: int((s=="✅").sum())),
+        Total_diamants=("Diamants","sum"),
+        Total_récompense_p1=("Récompense palier 1","sum"),
+        Total_récompense_p2=("Récompense palier 2","sum"),
+        Total_bonus_manager=("Bonus manager (diamants)","sum"),
+    )
+    return agg.sort_values("Total_diamants", ascending=False, na_position="last")
