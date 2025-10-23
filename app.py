@@ -69,9 +69,6 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
         out["creator_id"] = df["ID créateur(trice)"].astype(str)
     else:
         out["creator_id"] = out["creator_username"].astype(str)
-    for extra in ["Diamants des matchs","Diamants du mode multi-invité"]:
-        if extra in df.columns:
-            out["diamants"] = out["diamants"] + df[extra].apply(to_numeric_safe)
     for c in ["creator_username","groupe","agent","statut_diplome","periode"]:
         out[c] = out[c].astype(str)
     return out
