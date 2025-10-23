@@ -1,2 +1,8 @@
-pip install streamlit pandas numpy reportlab pyyaml openpyxl
-
+pip
+install
+streamlit
+pandas
+numpy
+reportlab
+pyyaml
+openpyxl
