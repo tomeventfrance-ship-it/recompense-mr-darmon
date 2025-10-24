@@ -316,15 +316,14 @@ else:
 
 st.markdown("""
 <style>
-/* masque le footer natif Streamlit */
 footer {visibility:hidden;}
 #MainMenu {visibility:hidden;}
-/* pied de page custom fixé */
 .app-footer {
   position: fixed; left: 0; right: 0; bottom: 0;
   padding: 6px 12px; text-align: center;
   background: rgba(0,0,0,0.05); font-size: 12px;
 }
 </style>
-<div class="app-footer">logiciels récompense by tom Consulting & Even</div>
+<div class="app-footer">logiciels récompense by tom Consulting & Event</div>
 """, unsafe_allow_html=True)
+
