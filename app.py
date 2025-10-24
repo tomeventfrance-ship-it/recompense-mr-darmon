@@ -1,10 +1,7 @@
-# app_v5.py — version complète validée
-# Inclut :
-# - Double historique (N-1, N-2) sans cumul
-# - Arrondi au millier inférieur pour prime_manager
-# - Pied de page “logiciels récompense by tom Consulting & Event”
-# - Titre “Monsieur Darmon”
-# - Tous les barèmes, bonus et règles validées précédemment
+# app_v6.py — version complète validée
+# Ajouts :
+# - Arrondi au millier inférieur pour prime_agent
+# - Conserve tout le reste de la version v5 (double historique, arrondi prime_manager, barèmes, etc.)
 
 import io, re, yaml
 from math import floor
@@ -90,7 +87,6 @@ P2=[(35000,74999,1000),(75000,149999,2500),(150000,199999,6000),(200000,299999,7
     (700000,799999,26999),(800000,899999,30000),(900000,999999,35000),(1000000,1499999,39999),
     (1500000,1999999,59999),(2000000,None,"PCT4")]
 
-# Bonus créateurs
 BONUS_CREATOR = [
     {"min":75000,"max":149999,"bonus":500,"code":"B1"},
     {"min":150000,"max":499999,"bonus":1088,"code":"B2"},
@@ -190,6 +186,7 @@ def compute_agents(crea):
     b=sum_bonus_for("agent",crea,{"B2":1000,"B3":15000})
     out=base.merge(b,on="agent",how="left").fillna({"bonus_additionnel":0})
     out["prime_agent"]=out["base_prime"]+out["bonus_additionnel"]
+    out["prime_agent"]=(np.floor(out["prime_agent"]/1000)*1000).astype(int)
     out.rename(columns={"diamants_actifs":"diamants_mois"},inplace=True)
     return out
 
@@ -204,7 +201,7 @@ def compute_managers(crea):
     out.rename(columns={"diamants_actifs":"diamants_mois"},inplace=True)
     return out
 
-# ---------- PDF ----------
+# ---------- PDF / UI ----------
 def make_pdf(title,df):
     buf=io.BytesIO()
     doc=SimpleDocTemplate(buf,pagesize=landscape(A4),leftMargin=18,rightMargin=18,topMargin=18,bottomMargin=18)
@@ -220,11 +217,9 @@ def safe_pdf(label,title,df,file):
     if df is None or df.empty: st.button(label,disabled=True)
     else: st.download_button(label,make_pdf(title,df),file,"application/pdf")
 
-# ---------- UI ----------
 st.title("Monsieur Darmon")
 st.caption("3 onglets indépendants • Base créateurs unique • Exports CSV & PDF")
 
-# Upload des fichiers
 c1,c2,c3,c4=st.columns(4)
 with c1:
     f_cur=st.file_uploader("Mois courant (XLSX/CSV)",type=["xlsx","xls","csv"],key="cur")
@@ -264,7 +259,6 @@ if f_cur:
         st.download_button("CSV Managers",man.to_csv(index=False).encode("utf-8"),"recompenses_managers.csv","text/csv")
         safe_pdf("PDF Managers","Récompenses Managers",man,"recompenses_managers.pdf")
 
-# Pied de page personnalisé
 st.markdown("""
 <style>
 footer {visibility:hidden;} #MainMenu {visibility:hidden;}
