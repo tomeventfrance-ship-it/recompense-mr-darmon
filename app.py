@@ -251,8 +251,6 @@ def make_pdf(title,df):
         ("GRID",(0,0),(-1,-1),0.25,colors.grey),
         ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.whitesmoke, colors.lightgrey])
     ]))
-  
-els.append(Paragraph("Logiciel Récompense by Tom Consulting & Event", styles["Normal"]))
     els.append(t);doc.build(els); buf.seek(0); return buf.read()
 
 def safe_pdf(label,title,df,file):
