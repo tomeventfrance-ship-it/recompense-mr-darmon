@@ -234,24 +234,42 @@ def compute_managers(crea):
     return out
 
 # ---------- PDF ----------
-def make_pdf(title,df):
-    buf=io.BytesIO()
-    doc=SimpleDocTemplate(buf,pagesize=landscape(A4), leftMargin=18, rightMargin=18, topMargin=18, bottomMargin=18)
-    styles=getSampleStyleSheet()
-    els=[Paragraph(title,styles["Title"]),Spacer(1,12)]
-    data=[list(df.columns)]+df.astype(str).values.tolist()
-    t=Table(data,repeatRows=1)
-    t.setStyle(TableStyle([
-        ("BACKGROUND",(0,0),(-1,0),colors.black),
-        ("TEXTCOLOR",(0,0),(-1,0),colors.white),
-        ("ALIGN",(0,0),(-1,-1),"CENTER"),
-        ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-        ("FONTSIZE",(0,0),(-1,0),9),
-        ("FONTSIZE",(0,1),(-1,-1),8),
-        ("GRID",(0,0),(-1,-1),0.25,colors.grey),
-        ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.whitesmoke, colors.lightgrey])
+def make_pdf(title, df):
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=landscape(A4),
+        leftMargin=18, rightMargin=18, topMargin=18, bottomMargin=18
+    )
+    styles = getSampleStyleSheet()
+    elements = [Paragraph(title, styles["Title"]), Spacer(1, 12)]
+
+    headers = list(df.columns)
+    data = [headers] + df.astype(str).values.tolist()
+    table = Table(data, repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), colors.black),
+        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+        ("ALIGN", (0,0), (-1,-1), "CENTER"),
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("FONTSIZE", (0,0), (-1,0), 9),
+        ("FONTSIZE", (0,1), (-1,-1), 8),
+        ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
+        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.whitesmoke, colors.lightgrey]),
     ]))
-    els.append(t);doc.build(els); buf.seek(0); return buf.read()
+    elements.append(table)
+
+    def _footer(canvas, doc_):
+        from reportlab.lib.units import mm
+        canvas.saveState()
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.grey)
+        canvas.drawString(18, 10*mm, "Logiciel Récompense by Tom Consulting & Event")
+        canvas.restoreState()
+
+    doc.build(elements, onFirstPage=_footer, onLaterPages=_footer)
+    buf.seek(0)
+    return buf.read()
+
 
 def safe_pdf(label,title,df,file):
     if df is None or df.empty: st.button(label,disabled=True)
