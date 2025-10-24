@@ -251,10 +251,8 @@ def make_pdf(title,df):
         ("GRID",(0,0),(-1,-1),0.25,colors.grey),
         ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.whitesmoke, colors.lightgrey])
     ]))
-    
-els.append(Spacer(1, 12))
-els.append(Paragraph("Logiciel Récompense by Tom Consulting & Event", styles["Normal"]))
-    els.append(t); doc.build(els); buf.seek(0); return buf.read()
+    els.append(t);els.append(Spacer(1, 12))
+els.append(Paragraph("Logiciel Récompense by Tom Consulting & Event", styles["Normal"])) doc.build(els); buf.seek(0); return buf.read()
 
 def safe_pdf(label,title,df,file):
     if df is None or df.empty: st.button(label,disabled=True)
