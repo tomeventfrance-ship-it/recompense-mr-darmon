@@ -230,6 +230,9 @@ def compute_managers(crea):
     b = sum_bonus_for("groupe", crea, bonus_map)
     out = base.merge(b, on="groupe", how="left").fillna({"bonus_additionnel":0})
     out["prime_manager"] = out["base_prime"] + out["bonus_additionnel"]
+    import numpy as np
+out["prime_manager"] = (np.floor(out["prime_manager"] / 1000) * 1000).astype(int)
+
     out.rename(columns={"diamants_actifs":"diamants_mois"}, inplace=True)
     return out
 
