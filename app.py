@@ -1,3 +1,11 @@
+# app_v5.py — version complète validée
+# Inclut :
+# - Double historique (N-1, N-2) sans cumul
+# - Arrondi au millier inférieur pour prime_manager
+# - Pied de page “logiciels récompense by tom Consulting & Event”
+# - Titre “Monsieur Darmon”
+# - Tous les barèmes, bonus et règles validées précédemment
+
 import io, re, yaml
 from math import floor
 from typing import Optional
@@ -7,8 +15,9 @@ from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
+import numpy as np
 
-st.set_page_config(page_title="Récompenses TCE", layout="wide")
+st.set_page_config(page_title="Monsieur Darmon", layout="wide")
 
 # ---------- I/O ----------
 @st.cache_data(show_spinner=False)
@@ -62,10 +71,7 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
     out["diamants"] = out["diamants"].apply(to_numeric_safe)
     out["jours_live"] = out["jours_live"].apply(lambda x: int(to_numeric_safe(x)))
     out["heures_live"] = df[COLS["duree_live"]].apply(parse_duration_to_hours) if COLS["duree_live"] in df.columns else 0.0
-    if "ID créateur(trice)" in df.columns:
-        out["creator_id"] = df["ID créateur(trice)"].astype(str)
-    else:
-        out["creator_id"] = out["creator_username"].astype(str)
+    out["creator_id"] = df.get("ID créateur(trice)", out["creator_username"]).astype(str)
     for c in ["creator_username","groupe","agent","statut_diplome","periode"]:
         out[c] = out[c].astype(str)
     return out
@@ -84,22 +90,20 @@ P2=[(35000,74999,1000),(75000,149999,2500),(150000,199999,6000),(200000,299999,7
     (700000,799999,26999),(800000,899999,30000),(900000,999999,35000),(1000000,1499999,39999),
     (1500000,1999999,59999),(2000000,None,"PCT4")]
 
-# Bonus créateurs (débutant non diplômé / 90j uniquement, une seule fois, non cumulable)
+# Bonus créateurs
 BONUS_CREATOR = [
     {"min":75000,"max":149999,"bonus":500,"code":"B1"},
     {"min":150000,"max":499999,"bonus":1088,"code":"B2"},
     {"min":500000,"max":2000000,"bonus":3000,"code":"B3"},
 ]
 
-# ---------- Logic ----------
+# ---------- Fonctions principales ----------
 def creator_type(row, hist):
     ever = False
     if hist is not None and not hist.empty:
         h = hist[hist["creator_id"]==row["creator_id"]]
-        if not h.empty and h["diamants"].max()>=THR_CONFIRMED:
-            ever = True
-    if "confirmé" in str(row.get("statut_diplome","")).lower():
-        ever = True
+        if not h.empty and h["diamants"].max()>=THR_CONFIRMED: ever=True
+    if "confirmé" in str(row.get("statut_diplome","")).lower(): ever=True
     return "confirmé" if ever else "débutant"
 
 def activity_ok(row, ctype):
@@ -122,7 +126,6 @@ def reward(amount,table):
 
 def eligible_beginner_status(statut: str) -> bool:
     s = (statut or "").lower()
-    # accepte formulations comme "débutant non diplômé 90j" ou proche
     return ("débutant" in s) and (("non diplôm" in s) or ("90" in s))
 
 def has_historical_bonus(hist: pd.DataFrame, creator_id: str) -> bool:
@@ -141,135 +144,77 @@ def compute_creators(df,hist):
         ok1,ok2,why=activity_ok(r,ctype)
         amount=float(r["diamants"])
         requires_second = amount>=THR_CONFIRMED
-
-        # Paliers
         p1 = reward(amount,P1) if ok1 and (not requires_second or (requires_second and not ok2)) else 0.0
         p2 = reward(amount,P2) if (requires_second and ok2) else 0.0
-        if requires_second and ok2: p1=0.0  # P2 annule P1
-
-        # Bonus créateur: débutant non diplômé/90j, jamais reçu, non cumulable => plus haut atteint
-        bval,bcode = 0.0,""
-        if ctype=="débutant" and eligible_beginner_status(r.get("statut_diplome","")) and not has_historical_bonus(hist, r["creator_id"]):
+        if requires_second and ok2: p1=0.0
+        bval,bcode=0.0,""
+        if ctype=="débutant" and eligible_beginner_status(r.get("statut_diplome","")) and not has_historical_bonus(hist,r["creator_id"]):
             for b in BONUS_CREATOR:
-                if amount>=b["min"] and amount<=b["max"]:
-                    bval,bcode = b["bonus"], b["code"]  # on place le bon bonus unique
-            # si >2M, aucun bonus supplémentaire car limite max = 2M
-
-        total = p1 + p2 + bval
-        if amount>=2_000_000:
-            total = float(floor(total/1000)*1000)  # arrondi millier inférieur
-
+                if amount>=b["min"] and amount<=b["max"]: bval,bcode=b["bonus"],b["code"]
+        total=p1+p2+bval
+        if amount>=2_000_000: total=float(floor(total/1000)*1000)
         etat="✅ Actif" if (p1>0 or p2>0) else "⚠️ Inactif"
-        reason = "" if etat=="✅ Actif" else why
-
+        reason="" if etat=="✅ Actif" else why
         rows.append({
-            "creator_id": r["creator_id"],
-            "creator_username": r["creator_username"],
-            "groupe": r["groupe"],
-            "agent": r["agent"],
-            "periode": r["periode"],
-            "diamants": amount,
-            "jours_live": int(r["jours_live"]),
-            "heures_live": float(r["heures_live"]),
-            "type_createur": ctype.capitalize(),
-            "etat_activite": etat,
-            "raison_ineligibilite": reason,
-            "recompense_palier_1": p1,
-            "recompense_palier_2": p2,
-            "bonus_debutant": bval,
-            "bonus_code": bcode,
-            "total_createur": total
-        })
+            "creator_id":r["creator_id"],"creator_username":r["creator_username"],"groupe":r["groupe"],"agent":r["agent"],
+            "periode":r["periode"],"diamants":amount,"jours_live":r["jours_live"],"heures_live":r["heures_live"],
+            "type_createur":ctype.capitalize(),"etat_activite":etat,"raison_ineligibilite":reason,
+            "recompense_palier_1":p1,"recompense_palier_2":p2,"bonus_debutant":bval,"bonus_code":bcode,"total_createur":total})
     return pd.DataFrame(rows)
 
-# ---------- Agents & Managers ----------
+# ---------- Agents / Managers ----------
 def totals_active_by(field,crea):
-    if crea is None or crea.empty:
-        return pd.DataFrame(columns=[field,"diamants_actifs"])
-    act = crea[crea["etat_activite"]=="✅ Actif"]
+    if crea is None or crea.empty: return pd.DataFrame(columns=[field,"diamants_actifs"])
+    act=crea[crea["etat_activite"]=="✅ Actif"]
     return act.groupby(field)["diamants"].sum().reset_index().rename(columns={"diamants":"diamants_actifs"})
 
 def percent_reward(total):
-    if total>=4_000_000: return total*0.03
-    if total>=200_000:  return total*0.02
+    if total>=4_000_000:return total*0.03
+    if total>=200_000:return total*0.02
     return 0.0
 
-def sum_bonus_for(group_col: str, crea: pd.DataFrame, map_amount: dict) -> pd.DataFrame:
-    if crea is None or crea.empty:
-        return pd.DataFrame(columns=[group_col,"bonus_additionnel"])
-    # prend le plus haut bonus par créateur, puis somme par groupe
-    tmp = crea[["creator_id",group_col,"bonus_code"]].copy()
-    # normalise au plus haut: B3 > B2 > B1; or seuls B2/B3 paient agent/manager
-    order = {"B3":3, "B2":2, "B1":1, "":0}
-    tmp["rank"] = tmp["bonus_code"].astype(str).str.upper().map(order).fillna(0)
-    tmp = tmp.sort_values(["creator_id","rank"], ascending=[True,False]).drop_duplicates("creator_id")
-    tmp["bonus_amount"] = tmp["bonus_code"].astype(str).str.upper().map(map_amount).fillna(0)
-    agg = tmp.groupby(group_col)["bonus_amount"].sum().reset_index().rename(columns={"bonus_amount":"bonus_additionnel"})
+def sum_bonus_for(group_col:str,crea:pd.DataFrame,map_amount:dict)->pd.DataFrame:
+    if crea is None or crea.empty: return pd.DataFrame(columns=[group_col,"bonus_additionnel"])
+    tmp=crea[["creator_id",group_col,"bonus_code"]].copy()
+    order={"B3":3,"B2":2,"B1":1,"":0}
+    tmp["rank"]=tmp["bonus_code"].astype(str).str.upper().map(order).fillna(0)
+    tmp=tmp.sort_values(["creator_id","rank"],ascending=[True,False]).drop_duplicates("creator_id")
+    tmp["bonus_amount"]=tmp["bonus_code"].astype(str).str.upper().map(map_amount).fillna(0)
+    agg=tmp.groupby(group_col)["bonus_amount"].sum().reset_index().rename(columns={"bonus_amount":"bonus_additionnel"})
     return agg
 
 def compute_agents(crea):
-    base = totals_active_by("agent",crea)
-    if base.empty: 
-        return pd.DataFrame(columns=["agent","diamants_mois","base_prime","bonus_additionnel","prime_agent"])
-    base["base_prime"] = base["diamants_actifs"].apply(percent_reward)
-    # bonus: B2 -> 1000, B3 -> 15000 per creator
-    bonus_map = {"B2":1000, "B3":15000}
-    b = sum_bonus_for("agent", crea, bonus_map)
-    out = base.merge(b, on="agent", how="left").fillna({"bonus_additionnel":0})
-    out["prime_agent"] = out["base_prime"] + out["bonus_additionnel"]
-    out.rename(columns={"diamants_actifs":"diamants_mois"}, inplace=True)
+    base=totals_active_by("agent",crea)
+    if base.empty:return pd.DataFrame(columns=["agent","diamants_mois","base_prime","bonus_additionnel","prime_agent"])
+    base["base_prime"]=base["diamants_actifs"].apply(percent_reward)
+    b=sum_bonus_for("agent",crea,{"B2":1000,"B3":15000})
+    out=base.merge(b,on="agent",how="left").fillna({"bonus_additionnel":0})
+    out["prime_agent"]=out["base_prime"]+out["bonus_additionnel"]
+    out.rename(columns={"diamants_actifs":"diamants_mois"},inplace=True)
     return out
 
 def compute_managers(crea):
-    base = totals_active_by("groupe",crea)
-    if base.empty:
-        return pd.DataFrame(columns=["groupe","diamants_mois","base_prime","bonus_additionnel","prime_manager"])
-    base["base_prime"] = base["diamants_actifs"].apply(percent_reward)
-    # bonus: B2 -> 1000, B3 -> 5000 per creator
-    bonus_map = {"B2":1000, "B3":5000}
-    b = sum_bonus_for("groupe", crea, bonus_map)
-    out = base.merge(b, on="groupe", how="left").fillna({"bonus_additionnel":0})
-    out["prime_manager"] = out["base_prime"] + out["bonus_additionnel"]
-    out.rename(columns={"diamants_actifs":"diamants_mois"}, inplace=True)
+    base=totals_active_by("groupe",crea)
+    if base.empty:return pd.DataFrame(columns=["groupe","diamants_mois","base_prime","bonus_additionnel","prime_manager"])
+    base["base_prime"]=base["diamants_actifs"].apply(percent_reward)
+    b=sum_bonus_for("groupe",crea,{"B2":1000,"B3":5000})
+    out=base.merge(b,on="groupe",how="left").fillna({"bonus_additionnel":0})
+    out["prime_manager"]=out["base_prime"]+out["bonus_additionnel"]
+    out["prime_manager"]=(np.floor(out["prime_manager"]/1000)*1000).astype(int)
+    out.rename(columns={"diamants_actifs":"diamants_mois"},inplace=True)
     return out
 
 # ---------- PDF ----------
-def make_pdf(title, df):
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buf, pagesize=landscape(A4),
-        leftMargin=18, rightMargin=18, topMargin=18, bottomMargin=18
-    )
-    styles = getSampleStyleSheet()
-    elements = [Paragraph(title, styles["Title"]), Spacer(1, 12)]
-
-    headers = list(df.columns)
-    data = [headers] + df.astype(str).values.tolist()
-    table = Table(data, repeatRows=1)
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), colors.black),
-        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-        ("ALIGN", (0,0), (-1,-1), "CENTER"),
-        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTSIZE", (0,0), (-1,0), 9),
-        ("FONTSIZE", (0,1), (-1,-1), 8),
-        ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
-        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.whitesmoke, colors.lightgrey]),
-    ]))
-    elements.append(table)
-
-    def _footer(canvas, doc_):
-        from reportlab.lib.units import mm
-        canvas.saveState()
-        canvas.setFont("Helvetica", 8)
-        canvas.setFillColor(colors.grey)
-        canvas.drawString(18, 10*mm, "Logiciel Récompense by Tom Consulting & Event")
-        canvas.restoreState()
-
-    doc.build(elements, onFirstPage=_footer, onLaterPages=_footer)
-    buf.seek(0)
-    return buf.read()
-
+def make_pdf(title,df):
+    buf=io.BytesIO()
+    doc=SimpleDocTemplate(buf,pagesize=landscape(A4),leftMargin=18,rightMargin=18,topMargin=18,bottomMargin=18)
+    styles=getSampleStyleSheet()
+    els=[Paragraph(title,styles["Title"]),Spacer(1,12)]
+    data=[list(df.columns)]+df.astype(str).values.tolist()
+    t=Table(data,repeatRows=1)
+    t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.black),("TEXTCOLOR",(0,0),(-1,0),colors.white),
+        ("GRID",(0,0),(-1,-1),0.25,colors.grey),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.whitesmoke,colors.lightgrey])]))
+    els.append(t); doc.build(els); buf.seek(0); return buf.read()
 
 def safe_pdf(label,title,df,file):
     if df is None or df.empty: st.button(label,disabled=True)
@@ -279,51 +224,52 @@ def safe_pdf(label,title,df,file):
 st.title("Monsieur Darmon")
 st.caption("3 onglets indépendants • Base créateurs unique • Exports CSV & PDF")
 
-c1,c2,c3=st.columns(3)
+# Upload des fichiers
+c1,c2,c3,c4=st.columns(4)
 with c1:
-    f_cur=st.file_uploader("Mois courant (XLSX/CSV)",type=["xlsx","xls","csv"])
+    f_cur=st.file_uploader("Mois courant (XLSX/CSV)",type=["xlsx","xls","csv"],key="cur")
 with c2:
-    f_prev=st.file_uploader("Mois précédent = historique (optionnel)",type=["xlsx","xls","csv"])
+    f_prev=st.file_uploader("Mois N-1 (historique)",type=["xlsx","xls","csv"],key="prev")
 with c3:
+    f_prev2=st.file_uploader("Mois N-2 (historique)",type=["xlsx","xls","csv"],key="prev2")
+with c4:
     if st.button("Forcer relecture"):
         st.cache_data.clear(); st.rerun()
 
 if f_cur:
     cur=normalize(read_any(f_cur.getvalue(),f_cur.name))
-    hist=normalize(read_any(f_prev.getvalue(),f_prev.name)) if f_prev else pd.DataFrame()
+    hist=pd.DataFrame()
+    if f_prev: hist=normalize(read_any(f_prev.getvalue(),f_prev.name))
+    if f_prev2:
+        hist2=normalize(read_any(f_prev2.getvalue(),f_prev2.name))
+        hist=pd.concat([hist,hist2],ignore_index=True) if not hist.empty else hist2
 
     t1,t2,t3=st.tabs(["Créateurs","Agents","Managers"])
 
     with t1:
         crea=compute_creators(cur,hist)
         st.dataframe(crea,use_container_width=True)
-        st.download_button("CSV Créateurs", crea.to_csv(index=False).encode("utf-8"), "recompenses_createurs.csv", "text/csv")
+        st.download_button("CSV Créateurs",crea.to_csv(index=False).encode("utf-8"),"recompenses_createurs.csv","text/csv")
         safe_pdf("PDF Créateurs","Récompenses Créateurs",crea,"recompenses_createurs.pdf")
 
     with t2:
         ag=compute_agents(crea)
         st.dataframe(ag,use_container_width=True)
-        st.download_button("CSV Agents", ag.to_csv(index=False).encode("utf-8"), "recompenses_agents.csv", "text/csv")
+        st.download_button("CSV Agents",ag.to_csv(index=False).encode("utf-8"),"recompenses_agents.csv","text/csv")
         safe_pdf("PDF Agents","Récompenses Agents",ag,"recompenses_agents.pdf")
 
     with t3:
         man=compute_managers(crea)
         st.dataframe(man,use_container_width=True)
-        st.download_button("CSV Managers", man.to_csv(index=False).encode("utf-8"), "recompenses_managers.csv", "text/csv")
+        st.download_button("CSV Managers",man.to_csv(index=False).encode("utf-8"),"recompenses_managers.csv","text/csv")
         safe_pdf("PDF Managers","Récompenses Managers",man,"recompenses_managers.pdf")
-else:
-    st.info("Charge le mois courant pour commencer.")
 
+# Pied de page personnalisé
 st.markdown("""
 <style>
-footer {visibility:hidden;}
-#MainMenu {visibility:hidden;}
-.app-footer {
-  position: fixed; left: 0; right: 0; bottom: 0;
-  padding: 6px 12px; text-align: center;
-  background: rgba(0,0,0,0.05); font-size: 12px;
-}
+footer {visibility:hidden;} #MainMenu {visibility:hidden;}
+.app-footer {position: fixed; left: 0; right: 0; bottom: 0;
+padding: 6px 12px; text-align: center; background: rgba(0,0,0,0.05); font-size: 12px;}
 </style>
-<div class="app-footer">logiciels récompense by tom Consulting & Event</div>
+<div class='app-footer'>logiciels récompense by tom Consulting & Event</div>
 """, unsafe_allow_html=True)
-
