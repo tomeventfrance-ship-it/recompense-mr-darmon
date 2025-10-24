@@ -258,7 +258,7 @@ def safe_pdf(label,title,df,file):
     else: st.download_button(label,make_pdf(title,df),file,"application/pdf")
 
 # ---------- UI ----------
-st.title("Logiciel Récompense Tom Consulting & Event")
+st.title("Monsieur Darmon")
 st.caption("3 onglets indépendants • Base créateurs unique • Exports CSV & PDF")
 
 c1,c2,c3=st.columns(3)
