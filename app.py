@@ -1,28 +1,22 @@
-# app_v6.py — version complète validée
-# Ajouts :
-# - Arrondi au millier inférieur pour prime_agent
-# - Conserve tout le reste de la version v5 (double historique, arrondi prime_manager, barèmes, etc.)
-
-import io, re, yaml
+# app_v7.py — app_v6 + filtrage par manager
+import io, re, yaml, os, numpy as np, pandas as pd, streamlit as st
 from math import floor
-from typing import Optional
-import pandas as pd
-import streamlit as st
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
-import numpy as np
 
 st.set_page_config(page_title="Monsieur Darmon", layout="wide")
 
-# ---------- I/O ----------
+MD_ROLE = os.getenv("MD_ROLE", "")
+MD_EMAIL = os.getenv("MD_EMAIL", "").lower()
+MANAGER_GROUPS = st.secrets.get("MANAGER_GROUPS", {}) if hasattr(st, "secrets") else {}
+ASSIGNED_GROUP = MANAGER_GROUPS.get(MD_EMAIL, "") if isinstance(MANAGER_GROUPS, dict) else ""
+
 @st.cache_data(show_spinner=False)
 def read_any(file_bytes: bytes, name: str) -> pd.DataFrame:
-    n = name.lower()
-    bio = io.BytesIO(file_bytes)
-    if n.endswith((".xlsx", ".xls")):
-        return pd.read_excel(bio)
+    bio = io.BytesIO(file_bytes); n = name.lower()
+    if n.endswith((".xlsx", ".xls")): return pd.read_excel(bio)
     return pd.read_csv(bio)
 
 def to_numeric_safe(x):
@@ -37,18 +31,17 @@ def parse_duration_to_hours(x) -> float:
     try: return float(s.replace(",", "."))
     except: pass
     if re.match(r"^\d{1,2}:\d{1,2}(:\d{1,2})?$", s):
-        parts = [int(p) for p in s.split(":")]
-        h = parts[0]; m = parts[1] if len(parts)>1 else 0; sec = parts[2] if len(parts)>2 else 0
+        h,m,*rest = [int(p) for p in s.split(":")]
+        sec = rest[0] if rest else 0
         return h + m/60 + sec/3600
-    h = re.search(r"(\d+)\s*h", s); m = re.search(r"(\d+)\s*m", s)
+    h = re.search(r"(\\d+)\\s*h", s); m = re.search(r"(\\d+)\\s*m", s)
     if h or m:
         hh = int(h.group(1)) if h else 0; mm = int(m.group(1)) if m else 0
         return hh + mm/60
-    mm = re.search(r"(\d+)\s*min", s)
+    mm = re.search(r"(\\d+)\\s*min", s)
     if mm: return int(mm.group(1))/60
     return 0.0
 
-# ---------- Normalisation ----------
 COLS = {
     "periode": "Période des données",
     "creator_username": "Nom d'utilisateur du/de la créateur(trice)",
@@ -60,7 +53,6 @@ COLS = {
     "jours_live": "Jours de passage en LIVE valides",
     "statut_diplome": "Statut du diplôme",
 }
-
 def normalize(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame()
     for k, v in COLS.items():
@@ -73,11 +65,8 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
         out[c] = out[c].astype(str)
     return out
 
-# ---------- Paramètres ----------
 THR_CONFIRMED = 150000
 ACTIVITY = {"beginner":(7,15),"confirmed":(12,25),"second":(20,80)}
-
-# Barèmes créateurs
 P1=[(35000,74999,1000),(75000,149999,2500),(150000,199999,5000),(200000,299999,6000),
     (300000,399999,7999),(400000,499999,12000),(500000,599999,15000),(600000,699999,18000),
     (700000,799999,21000),(800000,899999,24000),(900000,999999,26999),(1000000,1499999,30000),
@@ -86,26 +75,21 @@ P2=[(35000,74999,1000),(75000,149999,2500),(150000,199999,6000),(200000,299999,7
     (300000,399999,12000),(400000,499999,15000),(500000,599999,20000),(600000,699999,24000),
     (700000,799999,26999),(800000,899999,30000),(900000,999999,35000),(1000000,1499999,39999),
     (1500000,1999999,59999),(2000000,None,"PCT4")]
+BONUS_CREATOR=[{"min":75000,"max":149999,"bonus":500,"code":"B1"},
+               {"min":150000,"max":499999,"bonus":1088,"code":"B2"},
+               {"min":500000,"max":2000000,"bonus":3000,"code":"B3"}]
 
-BONUS_CREATOR = [
-    {"min":75000,"max":149999,"bonus":500,"code":"B1"},
-    {"min":150000,"max":499999,"bonus":1088,"code":"B2"},
-    {"min":500000,"max":2000000,"bonus":3000,"code":"B3"},
-]
-
-# ---------- Fonctions principales ----------
 def creator_type(row, hist):
-    ever = False
+    ever=False
     if hist is not None and not hist.empty:
-        h = hist[hist["creator_id"]==row["creator_id"]]
+        h=hist[hist["creator_id"]==row["creator_id"]]
         if not h.empty and h["diamants"].max()>=THR_CONFIRMED: ever=True
     if "confirmé" in str(row.get("statut_diplome","")).lower(): ever=True
     return "confirmé" if ever else "débutant"
 
 def activity_ok(row, ctype):
-    d = int(row.get("jours_live",0)); h = float(row.get("heures_live",0))
-    if ctype=="débutant": need_d,need_h=ACTIVITY["beginner"]
-    else: need_d,need_h=ACTIVITY["confirmed"]
+    d=int(row.get("jours_live",0)); h=float(row.get("heures_live",0))
+    need_d,need_h = ACTIVITY["beginner"] if ctype=="débutant" else ACTIVITY["confirmed"]
     ok1=(d>=need_d and h>=need_h)
     ok2=(d>=ACTIVITY["second"][0] and h>=ACTIVITY["second"][1])
     reason=[]
@@ -121,15 +105,15 @@ def reward(amount,table):
     return 0.0
 
 def eligible_beginner_status(statut: str) -> bool:
-    s = (statut or "").lower()
+    s=(statut or "").lower()
     return ("débutant" in s) and (("non diplôm" in s) or ("90" in s))
 
 def has_historical_bonus(hist: pd.DataFrame, creator_id: str) -> bool:
     if hist is None or hist.empty: return False
-    h = hist[hist.get("creator_id","").astype(str)==str(creator_id)]
+    h=hist[hist.get("creator_id","").astype(str)==str(creator_id)]
     if h.empty: return False
     if "bonus_code" in h.columns:
-        codes = h["bonus_code"].astype(str).str.upper().tolist()
+        codes=h["bonus_code"].astype(str).str.upper().tolist()
         return any(c in {"B1","B2","B3"} for c in codes)
     return False
 
@@ -148,17 +132,15 @@ def compute_creators(df,hist):
             for b in BONUS_CREATOR:
                 if amount>=b["min"] and amount<=b["max"]: bval,bcode=b["bonus"],b["code"]
         total=p1+p2+bval
-        if amount>=2_000_000: total=float(floor(total/1000)*1000)
+        if amount>=2_000_000: total=float(np.floor(total/1000)*1000)
         etat="✅ Actif" if (p1>0 or p2>0) else "⚠️ Inactif"
         reason="" if etat=="✅ Actif" else why
-        rows.append({
-            "creator_id":r["creator_id"],"creator_username":r["creator_username"],"groupe":r["groupe"],"agent":r["agent"],
-            "periode":r["periode"],"diamants":amount,"jours_live":r["jours_live"],"heures_live":r["heures_live"],
-            "type_createur":ctype.capitalize(),"etat_activite":etat,"raison_ineligibilite":reason,
-            "recompense_palier_1":p1,"recompense_palier_2":p2,"bonus_debutant":bval,"bonus_code":bcode,"total_createur":total})
+        rows.append({"creator_id":r["creator_id"],"creator_username":r["creator_username"],"groupe":r["groupe"],"agent":r["agent"],
+                     "periode":r["periode"],"diamants":amount,"jours_live":r["jours_live"],"heures_live":r["heures_live"],
+                     "type_createur":ctype.capitalize(),"etat_activite":etat,"raison_ineligibilite":reason,
+                     "recompense_palier_1":p1,"recompense_palier_2":p2,"bonus_debutant":bval,"bonus_code":bcode,"total_createur":total})
     return pd.DataFrame(rows)
 
-# ---------- Agents / Managers ----------
 def totals_active_by(field,crea):
     if crea is None or crea.empty: return pd.DataFrame(columns=[field,"diamants_actifs"])
     act=crea[crea["etat_activite"]=="✅ Actif"]
@@ -169,15 +151,14 @@ def percent_reward(total):
     if total>=200_000:return total*0.02
     return 0.0
 
-def sum_bonus_for(group_col:str,crea:pd.DataFrame,map_amount:dict)->pd.DataFrame:
+def sum_bonus_for(group_col,crea,map_amount):
     if crea is None or crea.empty: return pd.DataFrame(columns=[group_col,"bonus_additionnel"])
     tmp=crea[["creator_id",group_col,"bonus_code"]].copy()
     order={"B3":3,"B2":2,"B1":1,"":0}
     tmp["rank"]=tmp["bonus_code"].astype(str).str.upper().map(order).fillna(0)
     tmp=tmp.sort_values(["creator_id","rank"],ascending=[True,False]).drop_duplicates("creator_id")
     tmp["bonus_amount"]=tmp["bonus_code"].astype(str).str.upper().map(map_amount).fillna(0)
-    agg=tmp.groupby(group_col)["bonus_amount"].sum().reset_index().rename(columns={"bonus_amount":"bonus_additionnel"})
-    return agg
+    return tmp.groupby(group_col)["bonus_amount"].sum().reset_index().rename(columns={"bonus_amount":"bonus_additionnel"})
 
 def compute_agents(crea):
     base=totals_active_by("agent",crea)
@@ -201,7 +182,6 @@ def compute_managers(crea):
     out.rename(columns={"diamants_actifs":"diamants_mois"},inplace=True)
     return out
 
-# ---------- PDF / UI ----------
 def make_pdf(title,df):
     buf=io.BytesIO()
     doc=SimpleDocTemplate(buf,pagesize=landscape(A4),leftMargin=18,rightMargin=18,topMargin=18,bottomMargin=18)
@@ -218,7 +198,7 @@ def safe_pdf(label,title,df,file):
     else: st.download_button(label,make_pdf(title,df),file,"application/pdf")
 
 st.title("Monsieur Darmon")
-st.caption("3 onglets indépendants • Base créateurs unique • Exports CSV & PDF")
+st.caption("3 onglets indépendants • Filtrage automatique par rôle")
 
 c1,c2,c3,c4=st.columns(4)
 with c1:
@@ -238,6 +218,12 @@ if f_cur:
     if f_prev2:
         hist2=normalize(read_any(f_prev2.getvalue(),f_prev2.name))
         hist=pd.concat([hist,hist2],ignore_index=True) if not hist.empty else hist2
+
+    if MD_ROLE=="MANAGER":
+        if ASSIGNED_GROUP:
+            cur = cur[cur["groupe"]==ASSIGNED_GROUP]
+        else:
+            st.error("Aucun groupe assigné à votre email dans MANAGER_GROUPS."); st.stop()
 
     t1,t2,t3=st.tabs(["Créateurs","Agents","Managers"])
 
@@ -259,11 +245,11 @@ if f_cur:
         st.download_button("CSV Managers",man.to_csv(index=False).encode("utf-8"),"recompenses_managers.csv","text/csv")
         safe_pdf("PDF Managers","Récompenses Managers",man,"recompenses_managers.pdf")
 
-st.markdown("""
+st.markdown(\"\"\"
 <style>
 footer {visibility:hidden;} #MainMenu {visibility:hidden;}
 .app-footer {position: fixed; left: 0; right: 0; bottom: 0;
 padding: 6px 12px; text-align: center; background: rgba(0,0,0,0.05); font-size: 12px;}
 </style>
 <div class='app-footer'>logiciels récompense by tom Consulting & Event</div>
-""", unsafe_allow_html=True)
+\"\"\", unsafe_allow_html=True)
