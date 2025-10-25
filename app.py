@@ -250,7 +250,7 @@ if f_cur:
         safe_pdf('PDF Managers','Récompenses Managers',man,'recompenses_managers.pdf')
 
 # Footer + Menu visible
-st.markdown(\"\"\"
+st.markdown("""
 <style>
 #MainMenu {visibility: visible !important;}     /* affiche le menu */
 footer {visibility:hidden;}                    /* cache le footer streamlit par défaut */
@@ -258,4 +258,4 @@ footer {visibility:hidden;}                    /* cache le footer streamlit par 
 padding: 6px 12px; text-align: center; background: rgba(0,0,0,0.05); font-size: 12px;}
 </style>
 <div class='app-footer'>logiciels récompense by tom Consulting & Event</div>
-\"\"\", unsafe_allow_html=True)
+""", unsafe_allow_html=True)
