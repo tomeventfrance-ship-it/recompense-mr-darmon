@@ -1,4 +1,4 @@
-# app.py — version stable validée (ex-app_v6)
+# app.py — version stable validée (ex-app_v6) + base_prime arrondie (agents/managers)
 import io, re
 from math import floor
 import numpy as np
@@ -11,6 +11,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 
 st.set_page_config(page_title="Monsieur Darmon", layout="wide")
 
+# ---------- I/O ----------
 @st.cache_data(show_spinner=False)
 def read_any(file_bytes: bytes, name: str) -> pd.DataFrame:
     bio = io.BytesIO(file_bytes)
@@ -42,6 +43,7 @@ def parse_duration_to_hours(x) -> float:
     if mm: return int(mm.group(1))/60
     return 0.0
 
+# ---------- Normalisation ----------
 COLS = {
     'periode': "Période des données",
     'creator_username': "Nom d'utilisateur du/de la créateur(trice)",
@@ -69,9 +71,11 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
         out[c] = out[c].astype(str)
     return out
 
+# ---------- Paramètres ----------
 THR_CONFIRMED = 150000
 ACTIVITY = {'beginner':(7,15),'confirmed':(12,25),'second':(20,80)}
 
+# Barèmes créateurs
 P1=[(35000,74999,1000),(75000,149999,2500),(150000,199999,5000),(200000,299999,6000),
     (300000,399999,7999),(400000,499999,12000),(500000,599999,15000),(600000,699999,18000),
     (700000,799999,21000),(800000,899999,24000),(900000,999999,26999),(1000000,1499999,30000),
@@ -81,10 +85,12 @@ P2=[(35000,74999,1000),(75000,149999,2500),(150000,199999,6000),(200000,299999,7
     (700000,799999,26999),(800000,899999,30000),(900000,999999,35000),(1000000,1499999,39999),
     (1500000,1999999,59999),(2000000,None,'PCT4')]
 
+# Bonus créateurs
 BONUS_CREATOR=[{'min':75000,'max':149999,'bonus':500,'code':'B1'},
                {'min':150000,'max':499999,'bonus':1088,'code':'B2'},
                {'min':500000,'max':2000000,'bonus':3000,'code':'B3'}]
 
+# ---------- Calculs ----------
 def creator_type(row, hist):
     ever = False
     if hist is not None and not hist.empty:
@@ -172,6 +178,8 @@ def compute_agents(crea):
     base=totals_active_by('agent',crea)
     if base.empty:return pd.DataFrame(columns=['agent','diamants_mois','base_prime','bonus_additionnel','prime_agent'])
     base['base_prime']=base['diamants_actifs'].apply(percent_reward)
+    # ARRONDI base_prime au millier inférieur
+    base['base_prime']=(np.floor(base['base_prime']/1000)*1000).astype(int)
     b=sum_bonus_for('agent',crea,{'B2':1000,'B3':15000})
     out=base.merge(b,on='agent',how='left').fillna({'bonus_additionnel':0})
     out['prime_agent']=out['base_prime']+out['bonus_additionnel']
@@ -183,6 +191,8 @@ def compute_managers(crea):
     base=totals_active_by('groupe',crea)
     if base.empty:return pd.DataFrame(columns=['groupe','diamants_mois','base_prime','bonus_additionnel','prime_manager'])
     base['base_prime']=base['diamants_actifs'].apply(percent_reward)
+    # ARRONDI base_prime au millier inférieur
+    base['base_prime']=(np.floor(base['base_prime']/1000)*1000).astype(int)
     b=sum_bonus_for('groupe',crea,{'B2':1000,'B3':5000})
     out=base.merge(b,on='groupe',how='left').fillna({'bonus_additionnel':0})
     out['prime_manager']=out['base_prime']+out['bonus_additionnel']
