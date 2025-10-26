@@ -1,4 +1,6 @@
 # app.py — stable + thème (ui_theme.apply_theme) + arrondis validés
+import ui_theme
+ui_theme.apply_theme()
 import io, re
 from math import floor
 import numpy as np
