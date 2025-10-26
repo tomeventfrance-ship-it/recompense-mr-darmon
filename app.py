@@ -168,7 +168,7 @@ def sum_bonus_for(group_col:str,crea:pd.DataFrame,map_amount:dict)->pd.DataFrame
     order={'B3':3,'B2':2,'B1':1,'':0}
     tmp['rank']=tmp['bonus_code'].astype(str).str.upper().map(order).fillna(0)
     tmp=tmp.sort_values(['creator_id','rank'],ascending=[True,False]).drop_duplicates('creator_id')
-    tmp['bonus_amount']=tmp['bonus_code'].astype str).str.upper().map(map_amount).fillna(0)
+    tmp['bonus_amount']=tmp['bonus_code'].astype(str).str.upper().map(map_amount).fillna(0)
     agg=tmp.groupby(group_col)['bonus_amount'].sum().reset_index().rename(columns={'bonus_amount':'bonus_additionnel'})
     return agg
 
