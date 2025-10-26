@@ -1,4 +1,4 @@
-# app.py — même logique, menu Streamlit toujours visible
+# app.py — stable + thème (ui_theme.apply_theme) + arrondis validés
 import io, re
 from math import floor
 import numpy as np
@@ -10,6 +10,10 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 from reportlab.lib.styles import getSampleStyleSheet
 
 st.set_page_config(page_title="Monsieur Darmon", layout="wide")
+
+# Thème visuel indépendant
+from ui_theme import apply_theme
+apply_theme()  # auto ADMIN/MANAGER selon MD_ROLE ou secrets.DEFAULT_ROLE
 
 @st.cache_data(show_spinner=False)
 def read_any(file_bytes: bytes, name: str) -> pd.DataFrame:
@@ -164,7 +168,7 @@ def sum_bonus_for(group_col:str,crea:pd.DataFrame,map_amount:dict)->pd.DataFrame
     order={'B3':3,'B2':2,'B1':1,'':0}
     tmp['rank']=tmp['bonus_code'].astype(str).str.upper().map(order).fillna(0)
     tmp=tmp.sort_values(['creator_id','rank'],ascending=[True,False]).drop_duplicates('creator_id')
-    tmp['bonus_amount']=tmp['bonus_code'].astype(str).str.upper().map(map_amount).fillna(0)
+    tmp['bonus_amount']=tmp['bonus_code'].astype str).str.upper().map(map_amount).fillna(0)
     agg=tmp.groupby(group_col)['bonus_amount'].sum().reset_index().rename(columns={'bonus_amount':'bonus_additionnel'})
     return agg
 
@@ -200,6 +204,8 @@ def make_pdf(title,df):
     data=[list(df.columns)]+df.astype(str).values.tolist()
     t=Table(data,repeatRows=1)
     t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.black),('TEXTCOLOR',(0,0),(-1,0),colors.white),
+        ('ALIGN',(0,0),(-1,-1),'CENTER'),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),
+        ('FONTSIZE',(0,0),(-1,0),9),('FONTSIZE',(0,1),(-1,-1),8),
         ('GRID',(0,0),(-1,-1),0.25,colors.grey),('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.whitesmoke,colors.lightgrey])]))
     els.append(t); doc.build(els); buf.seek(0); return buf.read()
 
@@ -249,11 +255,10 @@ if f_cur:
         st.download_button('CSV Managers',man.to_csv(index=False).encode('utf-8'),'recompenses_managers.csv','text/csv')
         safe_pdf('PDF Managers','Récompenses Managers',man,'recompenses_managers.pdf')
 
-# Footer + Menu visible
 st.markdown("""
 <style>
-#MainMenu {visibility: visible !important;}     /* affiche le menu */
-footer {visibility:hidden;}                    /* cache le footer streamlit par défaut */
+#MainMenu {visibility: visible !important;}
+footer {visibility:hidden;}
 .app-footer {position: fixed; left: 0; right: 0; bottom: 0;
 padding: 6px 12px; text-align: center; background: rgba(0,0,0,0.05); font-size: 12px;}
 </style>
