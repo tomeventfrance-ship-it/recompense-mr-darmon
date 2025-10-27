@@ -1,6 +1,5 @@
-# app.py — stable + thème + 'Facture €' pour Agents et Managers
+# app.py — stable + thème + 'Facture €' arrondie au multiple de 5 inférieur (agents/managers)
 import io, re
-from math import floor
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -11,7 +10,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 
 st.set_page_config(page_title="Monsieur Darmon", layout="wide")
 
-# Thème visuel (assure-toi d'avoir ui_theme.py présent)
+# Thème visuel
 try:
     import ui_theme
     ui_theme.apply_theme()
@@ -191,7 +190,8 @@ def compute_agents(crea):
     out['prime_agent']=out['base_prime']+out['bonus_additionnel']
     out['prime_agent']=(np.floor(out['prime_agent']/1000)*1000).astype(int)
     out.rename(columns={'diamants_actifs':'diamants_mois'},inplace=True)
-    out['Facture €'] = (out['prime_agent'] * 0.0084).round(2)
+    # Facture € = multiple de 5 inférieur
+    out['Facture €'] = (np.floor((out['prime_agent'] * 0.0084) / 5) * 5).astype(int)
     cols = ['agent','diamants_mois','base_prime','bonus_additionnel','prime_agent','Facture €']
     return out[cols]
 
@@ -205,7 +205,8 @@ def compute_managers(crea):
     out['prime_manager']=out['base_prime']+out['bonus_additionnel']
     out['prime_manager']=(np.floor(out['prime_manager']/1000)*1000).astype(int)
     out.rename(columns={'diamants_actifs':'diamants_mois'},inplace=True)
-    out['Facture €'] = (out['prime_manager'] * 0.0084).round(2)
+    # Facture € = multiple de 5 inférieur
+    out['Facture €'] = (np.floor((out['prime_manager'] * 0.0084) / 5) * 5).astype(int)
     cols = ['groupe','diamants_mois','base_prime','bonus_additionnel','prime_manager','Facture €']
     return out[cols]
 
