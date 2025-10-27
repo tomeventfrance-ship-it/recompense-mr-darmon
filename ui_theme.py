@@ -129,3 +129,15 @@ def apply_theme(role: str | None = None):
         'border-radius:12px;color:#fff;font-size:12px;z-index:1000;">' + tag.title() + ' mode</div>',
         unsafe_allow_html=True,
     )
+st.markdown(
+    """
+    <style>
+    .stApp {
+        background: radial-gradient(circle at center, rgba(139,0,0,0.85) 0%, rgba(0,0,0,1) 100%),
+                    url("assets/logo.png") no-repeat center center fixed;
+        background-size: 300px auto, cover;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
