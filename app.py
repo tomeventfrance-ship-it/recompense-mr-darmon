@@ -215,8 +215,12 @@ def safe_pdf(label,title,df,file):
     if df is None or df.empty: st.button(label,disabled=True)
     else: st.download_button(label,make_pdf(title,df),file,'application/pdf')
 
-st.title('Monsieur Darmon')
-st.caption('3 onglets indépendants • Base créateurs unique • Exports CSV & PDF')
+st.markdown(
+    "<h1 style='text-align:center;margin:0 0 10px;'>Monsieur Darmon</h1>",
+    unsafe_allow_html=True
+)
+# pas de caption
+
 
 c1,c2,c3,c4=st.columns(4)
 with c1:
