@@ -1,134 +1,140 @@
-# ui_theme.py — Thème rouge/blanc/noir + logo + FORÇAGE typographie Poppins partout
-import os, base64
-from pathlib import Path as _Path
+# ui_theme.py — complet
+# Thème rouge/blanc/noir + Poppins + logo centré (desktop) et visible (mobile)
+# À utiliser dans app.py :
+#   import ui_theme
+#   ui_theme.apply_theme()
+import os, base64, pathlib
 import streamlit as st
 
 PRIMARY = "#e5093f"
 BLACK   = "#0b0b0b"
 WHITE   = "#ffffff"
 
-def _logo_b64() -> str | None:
-    p = _Path("assets/logo.png")
-    if not p.exists():
-        return None
-    try:
-        return base64.b64encode(p.read_bytes()).decode("utf-8")
-    except Exception:
-        return None
+def _logo_b64() -> str:
+    p = pathlib.Path("assets/logo.png")
+    if p.exists():
+        try:
+            return base64.b64encode(p.read_bytes()).decode("utf-8")
+        except Exception:
+            return ""
+    return ""
 
 def apply_theme(role: str | None = None):
-    # Charger la police AVANT le CSS
+    # 1) Police Poppins
     st.markdown(
         """
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-        """,
-        unsafe_allow_html=True,
+        """, unsafe_allow_html=True
     )
     font_stack = "'Poppins', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
 
-    # CSS global + forçage de font-family sur la plupart des widgets
+    # 2) Logo encodé
+    b64 = _logo_b64()
+
+    # 3) CSS complet (fond + mobile + widgets)
     css = f"""
     <style>
-      :root {{
-        --md-primary: {PRIMARY};
-        --md-black: {BLACK};
-        --md-white: {WHITE};
-      }}
+    :root {{
+      --md-primary: {PRIMARY};
+      --md-black: {BLACK};
+      --md-white: {WHITE};
+      --md-font: {font_stack};
+    }}
 
-      html, body, [data-testid="stAppViewContainer"],
-      section.main, .stMarkdown, .stText, .stCaption, p, small,
-      .stButton>button, .stDownloadButton>button,
-      .stTextInput input, .stTextArea textarea, .stSelectbox div, .stMultiSelect div,
-      .stDataFrame, .stDataFrame * {{
-        font-family: {font_stack} !important;
-      }}
+    /* Conteneur principal : logo + dégradé */
+    [data-testid="stAppViewContainer"] {{
+      background:
+        url('data:image/png;base64,{b64}') no-repeat center,
+        radial-gradient(1200px 600px at 20% 0%, #ff2f5a 0%, #c4002b 40%, #0b0b0b 100%) !important;
+      background-size: 28vmax, cover !important;   /* logo, gradient */
+      background-attachment: scroll, scroll;        /* compatible mobile */
+      color: var(--md-white);
+      font-family: var(--md-font) !important;
+    }}
+    section.main {{ position: relative; z-index: 1; }}
 
+    /* Mobile : repositionne et redimensionne le logo */
+    @media (max-width: 768px) {{
       [data-testid="stAppViewContainer"] {{
-        background: radial-gradient(1200px 600px at 20% 0%, #ff2f5a 0%, #c4002b 40%, #0b0b0b 100%) !important;
-        color: var(--md-white);
+        background-position: center 32%, center;
+        background-size: 60vw, cover !important;
       }}
-      section.main {{ position: relative; z-index: 1; }}
+    }}
 
-      [data-testid="stSidebar"] > div:first-child {{
+    /* Sidebar sombre */
+    [data-testid="stSidebar"] > div:first-child {{
         background: #0f0f10 !important;
         border-right: 1px solid rgba(255,255,255,0.06);
         color: var(--md-white);
-      }}
+        font-family: var(--md-font) !important;
+    }}
 
-      h1, h2, h3, h4, h5, h6 {{ color: var(--md-white); letter-spacing: .2px; font-weight: 600; }}
+    /* Titres et textes */
+    h1, h2, h3, h4, h5, h6 {{ color: var(--md-white); letter-spacing: .2px; font-weight: 600; font-family: var(--md-font) !important; }}
+    .stMarkdown, .stText, .stCaption, p, small {{ color: rgba(255,255,255,0.90); font-family: var(--md-font) !important; }}
 
-      .stButton>button {{
+    /* Boutons */
+    .stButton>button {{
         background: var(--md-primary) !important;
         color: var(--md-white) !important;
         border: 0 !important;
         font-weight: 600;
         border-radius: 10px;
-      }}
-      .stButton>button:hover {{ filter: brightness(1.06); }}
+        font-family: var(--md-font) !important;
+    }}
+    .stButton>button:hover {{ filter: brightness(1.06); }}
 
-      .stDownloadButton>button {{
+    /* Boutons de téléchargement */
+    .stDownloadButton>button {{
         background: transparent !important;
         border: 1px solid var(--md-primary) !important;
         color: var(--md-primary) !important;
         font-weight: 600;
         border-radius: 10px;
-      }}
-      .stDownloadButton>button:hover {{
+        font-family: var(--md-font) !important;
+    }}
+    .stDownloadButton>button:hover {{
         background: var(--md-primary) !important;
         color: var(--md-white) !important;
-      }}
+    }}
 
-      .stTabs [data-baseweb="tab-list"] {{ gap: 6px; }}
-      .stTabs [data-baseweb="tab"] {{
+    /* Onglets */
+    .stTabs [data-baseweb="tab-list"] {{ gap: 6px; }}
+    .stTabs [data-baseweb="tab"] {{
         background: rgba(255,255,255,0.06);
         border-radius: 10px;
         padding: 8px 14px;
         color: var(--md-white);
         font-weight: 600;
-      }}
-      .stTabs [aria-selected="true"] {{
+        font-family: var(--md-font) !important;
+    }}
+    .stTabs [aria-selected="true"] {{
         background: var(--md-primary);
         color: var(--md-white);
-      }}
+    }}
 
-      .stDataFrame thead tr th {{
+    /* Tableaux */
+    .stDataFrame thead tr th {{
         background: #000 !important;
         color: #fff !important;
         font-weight: 700 !important;
-      }}
-      .stDataFrame tbody tr:nth-child(odd) td {{ background: rgba(255,255,255,0.06) !important; }}
-      .stDataFrame tbody tr:nth-child(even) td {{ background: rgba(255,255,255,0.025) !important; }}
+        font-family: var(--md-font) !important;
+    }}
+    .stDataFrame tbody tr:nth-child(odd) td {{ background: rgba(255,255,255,0.06) !important; }}
+    .stDataFrame tbody tr:nth-child(even) td {{ background: rgba(255,255,255,0.025) !important; }}
 
-      .app-footer {{ color: rgba(255,255,255,0.75) !important; }}
-      #MainMenu {{ visibility: visible !important; }}
+    /* Footer custom si utilisé ailleurs */
+    .app-footer {{ color: rgba(255,255,255,0.75) !important; font-family: var(--md-font) !important; }}
+
+    /* Affiche toujours le menu */
+    #MainMenu {{ visibility: visible !important; }}
     </style>
     """
     st.markdown(css, unsafe_allow_html=True)
 
-   # --- Watermark logo centré en base64 ---
-import base64, pathlib
-p = pathlib.Path("assets/logo.png")
-if p.exists():
-    b64 = base64.b64encode(p.read_bytes()).decode("utf-8")
-    st.markdown(
-        f"""
-        <style>
-        .md-bg-logo {{
-          position: fixed; inset: 0; pointer-events: none;
-          background: center / 28vmax no-repeat url('data:image/png;base64,{b64}');
-          opacity: .10; z-index: 0;
-        }}
-        section.main {{ position: relative; z-index: 1; }}
-        </style>
-        <div class="md-bg-logo"></div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-    # Badge rôle
+    # 4) Badge rôle en haut à droite (si tu utilises MD_ROLE / DEFAULT_ROLE)
     tag = (os.getenv("MD_ROLE", "") or st.secrets.get("DEFAULT_ROLE", "ADMIN")).upper()
     st.markdown(
         '<div style="position:fixed;top:8px;right:12px;padding:4px 10px;'
@@ -136,15 +142,3 @@ if p.exists():
         'border-radius:12px;color:#fff;font-size:12px;z-index:1000;">' + tag.title() + ' mode</div>',
         unsafe_allow_html=True,
     )
-st.markdown(
-    """
-    <style>
-    .stApp {
-        background: radial-gradient(circle at center, rgba(139,0,0,0.85) 0%, rgba(0,0,0,1) 100%),
-                    url("assets/logo.png") no-repeat center center fixed;
-        background-size: 300px auto, cover;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
