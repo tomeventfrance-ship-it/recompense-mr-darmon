@@ -1,4 +1,6 @@
-# app.py — correctifs créateurs (<35k inactif, bonus <=90j)
+# app.py — correctifs hiérarchie
+# - <35k : Inactif pour créateur, 0 récompense
+# - MAIS si jours/heures OK et >= 750 diamants, alors compté pour Agents/Managers
 import io, re, datetime as dt
 import numpy as np
 import pandas as pd
@@ -10,12 +12,14 @@ from reportlab.lib.styles import getSampleStyleSheet
 
 st.set_page_config(page_title="Monsieur Darmon", layout="wide")
 
+# Thème visuel
 try:
     import ui_theme
     ui_theme.apply_theme()
 except Exception:
     pass
 
+# ---------- I/O ----------
 @st.cache_data(show_spinner=False)
 def read_any(file_bytes: bytes, name: str) -> pd.DataFrame:
     bio = io.BytesIO(file_bytes)
@@ -47,6 +51,7 @@ def parse_duration_to_hours(x) -> float:
     if mm: return int(mm.group(1))/60
     return 0.0
 
+# ---------- Normalisation ----------
 COLS = {
     'periode': "Période des données",
     'creator_username': "Nom d'utilisateur du/de la créateur(trice)",
@@ -74,9 +79,11 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
         out[c] = out[c].astype(str)
     return out
 
+# ---------- Paramètres ----------
 THR_CONFIRMED = 150000
 ACTIVITY = {'beginner':(7,15),'confirmed':(12,25),'second':(20,80)}
 
+# Barèmes créateurs
 P1=[(35000,74999,1000),(75000,149999,2500),(150000,199999,5000),(200000,299999,6000),
     (300000,399999,7999),(400000,499999,12000),(500000,599999,15000),(600000,699999,18000),
     (700000,799999,21000),(800000,899999,24000),(900000,999999,26999),(1000000,1499999,30000),
@@ -86,10 +93,12 @@ P2=[(35000,74999,1000),(75000,149999,2500),(150000,199999,6000),(200000,299999,7
     (700000,799999,26999),(800000,899999,30000),(900000,999999,35000),(1000000,1499999,39999),
     (1500000,1999999,59999),(2000000,None,'PCT4')]
 
+# Bonus créateurs
 BONUS_CREATOR=[{'min':75000,'max':149999,'bonus':500,'code':'B1'},
                {'min':150000,'max':499999,'bonus':1088,'code':'B2'},
                {'min':500000,'max':2000000,'bonus':3000,'code':'B3'}]
 
+# ---------- Utilitaires dates ----------
 def _parse_date_maybe(x: str):
     try:
         return pd.to_datetime(x, dayfirst=True, errors='coerce')
@@ -115,6 +124,7 @@ def days_since_relation(row) -> float | None:
     delta = per_end - rel
     return float(delta.days)
 
+# ---------- Calculs ----------
 def creator_type(row, hist):
     ever = False
     if hist is not None and not hist.empty:
@@ -126,8 +136,8 @@ def creator_type(row, hist):
 def activity_ok(row, ctype):
     d = int(row.get('jours_live',0)); h = float(row.get('heures_live',0))
     need_d,need_h = ACTIVITY['beginner'] if ctype=='débutant' else ACTIVITY['confirmed']
-    ok1=(d>=need_d and h>=need_h)
-    ok2=(d>=ACTIVITY['second'][0] and h>=ACTIVITY['second'][1])
+    ok1=(d>=need_d and h>=need_h)              # palier 1 validé selon le type
+    ok2=(d>=ACTIVITY['second'][0] and h>=ACTIVITY['second'][1])  # second palier
     reason=[]
     if not ok1:
         if d<need_d: reason.append('Pas assez de jours')
@@ -165,6 +175,10 @@ def compute_creators(df,hist):
         ctype=creator_type(r,hist)
         ok1,ok2,why=activity_ok(r,ctype)
 
+        # Actif hiérarchique = jours/heures OK et >= 750 diamants
+        actif_hierarchie = (ok1 or ok2) and (amount >= 750)
+
+        # Règle créateur : < 35 000 => Inactif et 0 récompense
         force_inactive = amount < 35000
 
         requires_second = amount>=THR_CONFIRMED
@@ -193,13 +207,14 @@ def compute_creators(df,hist):
             'creator_id':r['creator_id'],'creator_username':r['creator_username'],'groupe':r['groupe'],'agent':r['agent'],
             'periode':r['periode'],'diamants':amount,'jours_live':r['jours_live'],'heures_live':r['heures_live'],
             'type_createur':ctype.capitalize(),'etat_activite':etat,'raison_ineligibilite':reason,
-            'recompense_palier_1':p1,'recompense_palier_2':p2,'bonus_debutant':bval,'bonus_code':bcode,'total_createur':total})
+            'recompense_palier_1':p1,'recompense_palier_2':p2,'bonus_debutant':bval,'bonus_code':bcode,
+            'total_createur':total,'actif_hierarchie':actif_hierarchie})
     return pd.DataFrame(rows)
 
-def totals_active_by(field,crea):
-    if crea is None or crea.empty: return pd.DataFrame(columns=[field,'diamants_actifs'])
-    act=crea[crea['etat_activite']=='✅ Actif']
-    return act.groupby(field)['diamants'].sum().reset_index().rename(columns={'diamants':'diamants_actifs'})
+def totals_hierarchy_by(field,crea):
+    if crea is None or crea.empty: return pd.DataFrame(columns=[field,'diamants_hierarchie'])
+    base = crea[crea['actif_hierarchie'] == True]
+    return base.groupby(field)['diamants'].sum().reset_index().rename(columns={'diamants':'diamants_hierarchie'})
 
 def percent_reward(total):
     if total>=4_000_000:return total*0.03
@@ -217,29 +232,29 @@ def sum_bonus_for(group_col:str,crea:pd.DataFrame,map_amount:dict)->pd.DataFrame
     return agg
 
 def compute_agents(crea):
-    base=totals_active_by('agent',crea)
+    base=totals_hierarchy_by('agent',crea)
     if base.empty:return pd.DataFrame(columns=['agent','diamants_mois','base_prime','bonus_additionnel','prime_agent','Facture €'])
-    base['base_prime']=base['diamants_actifs'].apply(percent_reward)
+    base['base_prime']=base['diamants_hierarchie'].apply(percent_reward)
     base['base_prime']=(np.floor(base['base_prime']/1000)*1000).astype(int)
     b=sum_bonus_for('agent',crea,{'B2':1000,'B3':15000})
     out=base.merge(b,on='agent',how='left').fillna({'bonus_additionnel':0})
     out['prime_agent']=out['base_prime']+out['bonus_additionnel']
     out['prime_agent']=(np.floor(out['prime_agent']/1000)*1000).astype(int)
-    out.rename(columns={'diamants_actifs':'diamants_mois'},inplace=True)
+    out.rename(columns={'diamants_hierarchie':'diamants_mois'},inplace=True)
     out['Facture €'] = (np.floor((out['prime_agent'] * 0.0084) / 5) * 5).astype(int)
     cols = ['agent','diamants_mois','base_prime','bonus_additionnel','prime_agent','Facture €']
     return out[cols]
 
 def compute_managers(crea):
-    base=totals_active_by('groupe',crea)
+    base=totals_hierarchy_by('groupe',crea)
     if base.empty:return pd.DataFrame(columns=['groupe','diamants_mois','base_prime','bonus_additionnel','prime_manager','Facture €'])
-    base['base_prime']=base['diamants_actifs'].apply(percent_reward)
+    base['base_prime']=base['diamants_hierarchie'].apply(percent_reward)
     base['base_prime']=(np.floor(base['base_prime']/1000)*1000).astype(int)
     b=sum_bonus_for('groupe',crea,{'B2':1000,'B3':5000})
     out=base.merge(b,on='groupe',how='left').fillna({'bonus_additionnel':0})
     out['prime_manager']=out['base_prime']+out['bonus_additionnel']
     out['prime_manager']=(np.floor(out['prime_manager']/1000)*1000).astype(int)
-    out.rename(columns={'diamants_actifs':'diamants_mois'},inplace=True)
+    out.rename(columns={'diamants_hierarchie':'diamants_mois'},inplace=True)
     out['Facture €'] = (np.floor((out['prime_manager'] * 0.0084) / 5) * 5).astype(int)
     cols = ['groupe','diamants_mois','base_prime','bonus_additionnel','prime_manager','Facture €']
     return out[cols]
@@ -259,6 +274,7 @@ def safe_pdf(label,title,df,file):
     if df is None or df.empty: st.button(label,disabled=True)
     else: st.download_button(label,make_pdf(title,df),file,'application/pdf')
 
+# ---- UI ----
 st.markdown("<h1 style='text-align:center;margin:0 0 10px;'>Monsieur Darmon</h1>", unsafe_allow_html=True)
 
 c1,c2,c3,c4=st.columns(4)
