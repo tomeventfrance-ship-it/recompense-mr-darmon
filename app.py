@@ -1,5 +1,5 @@
-# app.py — stable + thème + 'Facture €' arrondie au multiple de 5 inférieur (agents/managers)
-import io, re
+# app.py — correctifs créateurs (<35k inactif, bonus <=90j)
+import io, re, datetime as dt
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -10,14 +10,12 @@ from reportlab.lib.styles import getSampleStyleSheet
 
 st.set_page_config(page_title="Monsieur Darmon", layout="wide")
 
-# Thème visuel
 try:
     import ui_theme
     ui_theme.apply_theme()
 except Exception:
     pass
 
-# ---------- I/O ----------
 @st.cache_data(show_spinner=False)
 def read_any(file_bytes: bytes, name: str) -> pd.DataFrame:
     bio = io.BytesIO(file_bytes)
@@ -49,7 +47,6 @@ def parse_duration_to_hours(x) -> float:
     if mm: return int(mm.group(1))/60
     return 0.0
 
-# ---------- Normalisation ----------
 COLS = {
     'periode': "Période des données",
     'creator_username': "Nom d'utilisateur du/de la créateur(trice)",
@@ -73,15 +70,13 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
     else:
         out['heures_live'] = 0.0
     out['creator_id'] = df.get('ID créateur(trice)', out['creator_username']).astype(str)
-    for c in ['creator_username','groupe','agent','statut_diplome','periode']:
+    for c in ['creator_username','groupe','agent','statut_diplome','periode','date_relation']:
         out[c] = out[c].astype(str)
     return out
 
-# ---------- Paramètres ----------
 THR_CONFIRMED = 150000
 ACTIVITY = {'beginner':(7,15),'confirmed':(12,25),'second':(20,80)}
 
-# Barèmes créateurs
 P1=[(35000,74999,1000),(75000,149999,2500),(150000,199999,5000),(200000,299999,6000),
     (300000,399999,7999),(400000,499999,12000),(500000,599999,15000),(600000,699999,18000),
     (700000,799999,21000),(800000,899999,24000),(900000,999999,26999),(1000000,1499999,30000),
@@ -91,12 +86,35 @@ P2=[(35000,74999,1000),(75000,149999,2500),(150000,199999,6000),(200000,299999,7
     (700000,799999,26999),(800000,899999,30000),(900000,999999,35000),(1000000,1499999,39999),
     (1500000,1999999,59999),(2000000,None,'PCT4')]
 
-# Bonus créateurs
 BONUS_CREATOR=[{'min':75000,'max':149999,'bonus':500,'code':'B1'},
                {'min':150000,'max':499999,'bonus':1088,'code':'B2'},
                {'min':500000,'max':2000000,'bonus':3000,'code':'B3'}]
 
-# ---------- Calculs ----------
+def _parse_date_maybe(x: str):
+    try:
+        return pd.to_datetime(x, dayfirst=True, errors='coerce')
+    except Exception:
+        return pd.NaT
+
+def _period_end(periode: str):
+    d = _parse_date_maybe(periode)
+    if pd.isna(d):
+        try:
+            d = pd.to_datetime(str(periode) + "-01", errors='coerce')
+        except Exception:
+            d = pd.NaT
+    if pd.isna(d):
+        return pd.NaT
+    return (d + pd.offsets.MonthEnd(0)).normalize()
+
+def days_since_relation(row) -> float | None:
+    rel = _parse_date_maybe(row.get('date_relation',''))
+    per_end = _period_end(row.get('periode',''))
+    if pd.isna(rel) or pd.isna(per_end):
+        return None
+    delta = per_end - rel
+    return float(delta.days)
+
 def creator_type(row, hist):
     ever = False
     if hist is not None and not hist.empty:
@@ -122,9 +140,14 @@ def reward(amount,table):
             return round(amount*0.04,2) if val=='PCT4' else float(val)
     return 0.0
 
-def eligible_beginner_status(statut: str) -> bool:
-    s = (statut or '').lower()
-    return ('débutant' in s) and (('non diplôm' in s) or ('90' in s))
+def eligible_beginner_status(row) -> bool:
+    statut = (row.get('statut_diplome','') or '').lower()
+    if 'débutant' not in statut:
+        return False
+    d = days_since_relation(row)
+    if d is None:
+        return False
+    return d <= 90.0
 
 def has_historical_bonus(hist: pd.DataFrame, creator_id: str) -> bool:
     if hist is None or hist.empty: return False
@@ -138,21 +161,34 @@ def has_historical_bonus(hist: pd.DataFrame, creator_id: str) -> bool:
 def compute_creators(df,hist):
     rows=[]
     for _,r in df.iterrows():
+        amount=float(r['diamants'])
         ctype=creator_type(r,hist)
         ok1,ok2,why=activity_ok(r,ctype)
-        amount=float(r['diamants'])
+
+        force_inactive = amount < 35000
+
         requires_second = amount>=THR_CONFIRMED
         p1 = reward(amount,P1) if ok1 and (not requires_second or (requires_second and not ok2)) else 0.0
         p2 = reward(amount,P2) if (requires_second and ok2) else 0.0
         if requires_second and ok2: p1=0.0
+
+        if force_inactive:
+            p1 = 0.0; p2 = 0.0
+
         bval,bcode=0.0,''
-        if ctype=='débutant' and eligible_beginner_status(r.get('statut_diplome','')) and not has_historical_bonus(hist,r['creator_id']):
+        if (ctype=='débutant') and eligible_beginner_status(r) and not has_historical_bonus(hist,r['creator_id']):
             for b in BONUS_CREATOR:
-                if amount>=b['min'] and amount<=b['max']: bval,bcode=b['bonus'],b['code']
+                if amount>=b['min'] and amount<=b['max']:
+                    bval,bcode=b['bonus'],b['code']; break
+
         total=p1+p2+bval
         if amount>=2_000_000: total=float(np.floor(total/1000)*1000)
+
         etat='✅ Actif' if (p1>0 or p2>0) else '⚠️ Inactif'
+        if force_inactive:
+            etat='⚠️ Inactif'; why = "Diamants < 35 000"
         reason='' if etat=='✅ Actif' else why
+
         rows.append({
             'creator_id':r['creator_id'],'creator_username':r['creator_username'],'groupe':r['groupe'],'agent':r['agent'],
             'periode':r['periode'],'diamants':amount,'jours_live':r['jours_live'],'heures_live':r['heures_live'],
@@ -190,7 +226,6 @@ def compute_agents(crea):
     out['prime_agent']=out['base_prime']+out['bonus_additionnel']
     out['prime_agent']=(np.floor(out['prime_agent']/1000)*1000).astype(int)
     out.rename(columns={'diamants_actifs':'diamants_mois'},inplace=True)
-    # Facture € = multiple de 5 inférieur
     out['Facture €'] = (np.floor((out['prime_agent'] * 0.0084) / 5) * 5).astype(int)
     cols = ['agent','diamants_mois','base_prime','bonus_additionnel','prime_agent','Facture €']
     return out[cols]
@@ -205,7 +240,6 @@ def compute_managers(crea):
     out['prime_manager']=out['base_prime']+out['bonus_additionnel']
     out['prime_manager']=(np.floor(out['prime_manager']/1000)*1000).astype(int)
     out.rename(columns={'diamants_actifs':'diamants_mois'},inplace=True)
-    # Facture € = multiple de 5 inférieur
     out['Facture €'] = (np.floor((out['prime_manager'] * 0.0084) / 5) * 5).astype(int)
     cols = ['groupe','diamants_mois','base_prime','bonus_additionnel','prime_manager','Facture €']
     return out[cols]
@@ -225,7 +259,6 @@ def safe_pdf(label,title,df,file):
     if df is None or df.empty: st.button(label,disabled=True)
     else: st.download_button(label,make_pdf(title,df),file,'application/pdf')
 
-# ---- UI ----
 st.markdown("<h1 style='text-align:center;margin:0 0 10px;'>Monsieur Darmon</h1>", unsafe_allow_html=True)
 
 c1,c2,c3,c4=st.columns(4)
