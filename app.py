@@ -1,6 +1,4 @@
-# app.py — stable + thème (ui_theme.apply_theme) + arrondis validés
-import ui_theme
-ui_theme.apply_theme()
+# app.py — stable + thème + 'Facture €' pour Agents et Managers
 import io, re
 from math import floor
 import numpy as np
@@ -13,10 +11,14 @@ from reportlab.lib.styles import getSampleStyleSheet
 
 st.set_page_config(page_title="Monsieur Darmon", layout="wide")
 
-# Thème visuel indépendant
-from ui_theme import apply_theme
-apply_theme()  # auto ADMIN/MANAGER selon MD_ROLE ou secrets.DEFAULT_ROLE
+# Thème visuel (assure-toi d'avoir ui_theme.py présent)
+try:
+    import ui_theme
+    ui_theme.apply_theme()
+except Exception:
+    pass
 
+# ---------- I/O ----------
 @st.cache_data(show_spinner=False)
 def read_any(file_bytes: bytes, name: str) -> pd.DataFrame:
     bio = io.BytesIO(file_bytes)
@@ -48,6 +50,7 @@ def parse_duration_to_hours(x) -> float:
     if mm: return int(mm.group(1))/60
     return 0.0
 
+# ---------- Normalisation ----------
 COLS = {
     'periode': "Période des données",
     'creator_username': "Nom d'utilisateur du/de la créateur(trice)",
@@ -75,9 +78,11 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
         out[c] = out[c].astype(str)
     return out
 
+# ---------- Paramètres ----------
 THR_CONFIRMED = 150000
 ACTIVITY = {'beginner':(7,15),'confirmed':(12,25),'second':(20,80)}
 
+# Barèmes créateurs
 P1=[(35000,74999,1000),(75000,149999,2500),(150000,199999,5000),(200000,299999,6000),
     (300000,399999,7999),(400000,499999,12000),(500000,599999,15000),(600000,699999,18000),
     (700000,799999,21000),(800000,899999,24000),(900000,999999,26999),(1000000,1499999,30000),
@@ -87,10 +92,12 @@ P2=[(35000,74999,1000),(75000,149999,2500),(150000,199999,6000),(200000,299999,7
     (700000,799999,26999),(800000,899999,30000),(900000,999999,35000),(1000000,1499999,39999),
     (1500000,1999999,59999),(2000000,None,'PCT4')]
 
+# Bonus créateurs
 BONUS_CREATOR=[{'min':75000,'max':149999,'bonus':500,'code':'B1'},
                {'min':150000,'max':499999,'bonus':1088,'code':'B2'},
                {'min':500000,'max':2000000,'bonus':3000,'code':'B3'}]
 
+# ---------- Calculs ----------
 def creator_type(row, hist):
     ever = False
     if hist is not None and not hist.empty:
@@ -176,7 +183,7 @@ def sum_bonus_for(group_col:str,crea:pd.DataFrame,map_amount:dict)->pd.DataFrame
 
 def compute_agents(crea):
     base=totals_active_by('agent',crea)
-    if base.empty:return pd.DataFrame(columns=['agent','diamants_mois','base_prime','bonus_additionnel','prime_agent'])
+    if base.empty:return pd.DataFrame(columns=['agent','diamants_mois','base_prime','bonus_additionnel','prime_agent','Facture €'])
     base['base_prime']=base['diamants_actifs'].apply(percent_reward)
     base['base_prime']=(np.floor(base['base_prime']/1000)*1000).astype(int)
     b=sum_bonus_for('agent',crea,{'B2':1000,'B3':15000})
@@ -184,11 +191,13 @@ def compute_agents(crea):
     out['prime_agent']=out['base_prime']+out['bonus_additionnel']
     out['prime_agent']=(np.floor(out['prime_agent']/1000)*1000).astype(int)
     out.rename(columns={'diamants_actifs':'diamants_mois'},inplace=True)
-    return out
+    out['Facture €'] = (out['prime_agent'] * 0.0084).round(2)
+    cols = ['agent','diamants_mois','base_prime','bonus_additionnel','prime_agent','Facture €']
+    return out[cols]
 
 def compute_managers(crea):
     base=totals_active_by('groupe',crea)
-    if base.empty:return pd.DataFrame(columns=['groupe','diamants_mois','base_prime','bonus_additionnel','prime_manager'])
+    if base.empty:return pd.DataFrame(columns=['groupe','diamants_mois','base_prime','bonus_additionnel','prime_manager','Facture €'])
     base['base_prime']=base['diamants_actifs'].apply(percent_reward)
     base['base_prime']=(np.floor(base['base_prime']/1000)*1000).astype(int)
     b=sum_bonus_for('groupe',crea,{'B2':1000,'B3':5000})
@@ -196,7 +205,9 @@ def compute_managers(crea):
     out['prime_manager']=out['base_prime']+out['bonus_additionnel']
     out['prime_manager']=(np.floor(out['prime_manager']/1000)*1000).astype(int)
     out.rename(columns={'diamants_actifs':'diamants_mois'},inplace=True)
-    return out
+    out['Facture €'] = (out['prime_manager'] * 0.0084).round(2)
+    cols = ['groupe','diamants_mois','base_prime','bonus_additionnel','prime_manager','Facture €']
+    return out[cols]
 
 def make_pdf(title,df):
     buf=io.BytesIO()
@@ -206,8 +217,6 @@ def make_pdf(title,df):
     data=[list(df.columns)]+df.astype(str).values.tolist()
     t=Table(data,repeatRows=1)
     t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.black),('TEXTCOLOR',(0,0),(-1,0),colors.white),
-        ('ALIGN',(0,0),(-1,-1),'CENTER'),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),
-        ('FONTSIZE',(0,0),(-1,0),9),('FONTSIZE',(0,1),(-1,-1),8),
         ('GRID',(0,0),(-1,-1),0.25,colors.grey),('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.whitesmoke,colors.lightgrey])]))
     els.append(t); doc.build(els); buf.seek(0); return buf.read()
 
@@ -215,12 +224,8 @@ def safe_pdf(label,title,df,file):
     if df is None or df.empty: st.button(label,disabled=True)
     else: st.download_button(label,make_pdf(title,df),file,'application/pdf')
 
-st.markdown(
-    "<h1 style='text-align:center;margin:0 0 10px;'>Monsieur Darmon</h1>",
-    unsafe_allow_html=True
-)
-# pas de caption
-
+# ---- UI ----
+st.markdown("<h1 style='text-align:center;margin:0 0 10px;'>Monsieur Darmon</h1>", unsafe_allow_html=True)
 
 c1,c2,c3,c4=st.columns(4)
 with c1:
