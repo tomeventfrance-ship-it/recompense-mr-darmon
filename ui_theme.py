@@ -107,19 +107,26 @@ def apply_theme(role: str | None = None):
     """
     st.markdown(css, unsafe_allow_html=True)
 
-    # Filigrane/logo centré discret
-    b64 = _logo_b64()
-    if b64:
-        st.markdown(
-            """<style>
-            .bg-logo {{
-              position: fixed; inset: 0; pointer-events: none;
-              background: center / 28vmax no-repeat url('data:image/png;base64,""" + b64 + """');
-              opacity: .08; z-index: 0;
-            }}
-            </style><div class='bg-logo'></div>""",
-            unsafe_allow_html=True,
-        )
+   # --- Watermark logo centré en base64 ---
+import base64, pathlib
+p = pathlib.Path("assets/logo.png")
+if p.exists():
+    b64 = base64.b64encode(p.read_bytes()).decode("utf-8")
+    st.markdown(
+        f"""
+        <style>
+        .md-bg-logo {{
+          position: fixed; inset: 0; pointer-events: none;
+          background: center / 28vmax no-repeat url('data:image/png;base64,{b64}');
+          opacity: .10; z-index: 0;
+        }}
+        section.main {{ position: relative; z-index: 1; }}
+        </style>
+        <div class="md-bg-logo"></div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 
     # Badge rôle
     tag = (os.getenv("MD_ROLE", "") or st.secrets.get("DEFAULT_ROLE", "ADMIN")).upper()
