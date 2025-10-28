@@ -306,7 +306,7 @@ if f_cur:
         st.download_button('CSV Managers',man.to_csv(index=False).encode('utf-8'),'recompenses_managers.csv','text/csv')
         safe_pdf('PDF Managers','Récompenses Managers',man,'recompenses_managers.pdf')
 
-st.markdown(\"\"\"
+st.markdown("""
 <style>
 #MainMenu {visibility: visible !important;}
 footer {visibility:hidden;}
