@@ -1,7 +1,5 @@
-# app.py — correctifs hiérarchie
-# - <35k : Inactif pour créateur, 0 récompense
-# - MAIS si jours/heures OK et >= 750 diamants, alors compté pour Agents/Managers
-import io, re, datetime as dt
+# app.py — correctifs : bonus A/M non nuls + statut "recruté comme non débutant" = confirmé
+import io, re
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -12,7 +10,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 
 st.set_page_config(page_title="Monsieur Darmon", layout="wide")
 
-# Thème visuel
+# Thème
 try:
     import ui_theme
     ui_theme.apply_theme()
@@ -98,46 +96,23 @@ BONUS_CREATOR=[{'min':75000,'max':149999,'bonus':500,'code':'B1'},
                {'min':150000,'max':499999,'bonus':1088,'code':'B2'},
                {'min':500000,'max':2000000,'bonus':3000,'code':'B3'}]
 
-# ---------- Utilitaires dates ----------
-def _parse_date_maybe(x: str):
-    try:
-        return pd.to_datetime(x, dayfirst=True, errors='coerce')
-    except Exception:
-        return pd.NaT
-
-def _period_end(periode: str):
-    d = _parse_date_maybe(periode)
-    if pd.isna(d):
-        try:
-            d = pd.to_datetime(str(periode) + "-01", errors='coerce')
-        except Exception:
-            d = pd.NaT
-    if pd.isna(d):
-        return pd.NaT
-    return (d + pd.offsets.MonthEnd(0)).normalize()
-
-def days_since_relation(row) -> float | None:
-    rel = _parse_date_maybe(row.get('date_relation',''))
-    per_end = _period_end(row.get('periode',''))
-    if pd.isna(rel) or pd.isna(per_end):
-        return None
-    delta = per_end - rel
-    return float(delta.days)
-
-# ---------- Calculs ----------
+# ---------- Logique ----------
 def creator_type(row, hist):
+    statut = str(row.get('statut_diplome','')).lower()
     ever = False
     if hist is not None and not hist.empty:
         h = hist[hist['creator_id']==row['creator_id']]
-        if not h.empty and h['diamants'].max()>=THR_CONFIRMED: ever=True
-    if 'confirmé' in str(row.get('statut_diplome','')).lower(): ever=True
+        if not h.empty and h['diamants'].max()>=THR_CONFIRMED:
+            ever = True
+    if ('confirm' in statut) or ('non débutant' in statut):
+        ever = True
     return 'confirmé' if ever else 'débutant'
 
 def activity_ok(row, ctype):
     d = int(row.get('jours_live',0)); h = float(row.get('heures_live',0))
     need_d,need_h = ACTIVITY['beginner'] if ctype=='débutant' else ACTIVITY['confirmed']
-    ok1=(d>=need_d and h>=need_h)              # palier 1 validé selon le type
-    ok2=(d>=ACTIVITY['second'][0] and h>=ACTIVITY['second'][1])  # second palier
+    ok1=(d>=need_d and h>=need_h)
+    ok2=(d>=ACTIVITY['second'][0] and h>=ACTIVITY['second'][1])
     reason=[]
     if not ok1:
         if d<need_d: reason.append('Pas assez de jours')
@@ -152,12 +127,11 @@ def reward(amount,table):
 
 def eligible_beginner_status(row) -> bool:
     statut = (row.get('statut_diplome','') or '').lower()
+    if ('non débutant' in statut) or ('confirm' in statut):
+        return False
     if 'débutant' not in statut:
         return False
-    d = days_since_relation(row)
-    if d is None:
-        return False
-    return d <= 90.0
+    return ('90' in statut)
 
 def has_historical_bonus(hist: pd.DataFrame, creator_id: str) -> bool:
     if hist is None or hist.empty: return False
@@ -175,10 +149,7 @@ def compute_creators(df,hist):
         ctype=creator_type(r,hist)
         ok1,ok2,why=activity_ok(r,ctype)
 
-        # Actif hiérarchique = jours/heures OK et >= 750 diamants
         actif_hierarchie = (ok1 or ok2) and (amount >= 750)
-
-        # Règle créateur : < 35 000 => Inactif et 0 récompense
         force_inactive = amount < 35000
 
         requires_second = amount>=THR_CONFIRMED
@@ -274,7 +245,7 @@ def safe_pdf(label,title,df,file):
     if df is None or df.empty: st.button(label,disabled=True)
     else: st.download_button(label,make_pdf(title,df),file,'application/pdf')
 
-# ---- UI ----
+# ---------- UI ----------
 st.markdown("<h1 style='text-align:center;margin:0 0 10px;'>Monsieur Darmon</h1>", unsafe_allow_html=True)
 
 c1,c2,c3,c4=st.columns(4)
