@@ -1,4 +1,4 @@
-# app.py — règle AL + bonus progressif
+# app.py — correctif bonus 2: débutant(e) « en 90 j » éligible (diplômé(e) ou non), hors « depuis +90 j »
 import io, re, unicodedata
 import numpy as np
 import pandas as pd
@@ -8,7 +8,7 @@ from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 
-st.set_page_config(page_title='Monsieur Darmon', layout='wide')
+st.set_page_config(page_title="Monsieur Darmon", layout="wide")
 
 try:
     import ui_theme
@@ -84,6 +84,9 @@ P2=[(35000,74999,1000),(75000,149999,2500),(150000,199999,6000),(200000,299999,7
     (700000,799999,26999),(800000,899999,30000),(900000,999999,35000),(1000000,1499999,39999),
     (1500000,1999999,59999),(2000000,None,'PCT4')]
 
+BONUS_CREATOR=[{'min':75000,'max':149999,'bonus':500,'code':'B1'},
+               {'min':150000,'max':499999,'bonus':1088,'code':'B2'},
+               {'min':500000,'max':2000000,'bonus':3000,'code':'B3'}]
 RANK={'':0,'B1':1,'B2':2,'B3':3}
 
 def _norm(s: str) -> str:
@@ -93,21 +96,28 @@ def _norm(s: str) -> str:
     return s
 
 PLUS90 = re.compile(r'(?:\+|>|plus)\s*90')
-EN_90_RE = re.compile(r'(?:\ben\s+90\s*j\b|en 90j)')
+# Éligible si "debutant" ET mention de 90 j sans "+", tolère "en 90 j", "90j", "moins de 90 j"
+ELIG_90 = re.compile(r'(?:en|moins\s+de)?\s*90\s*j')
 
 def status_flags(statut_raw: str):
     s = _norm(statut_raw)
     is_confirmed = False
     bonus_block = False
     beginner_eligible = False
+
     if 'confirme' in s:
         is_confirmed = True; bonus_block = True
+
     if 'recrute' in s and 'non debutant' in s:
         is_confirmed = True; bonus_block = True
+
     if ('debutant' in s and 'depuis' in s and PLUS90.search(s)):
         is_confirmed = True; bonus_block = True
-    if ('debutant' in s and 'non diplome' in s and EN_90_RE.search(s)) and not is_confirmed:
+
+    # Débutant dans fenêtre 90 j (diplômé ou non), sans "+90"
+    if ('debutant' in s) and ELIG_90.search(s) and not PLUS90.search(s) and 'depuis' not in s and not is_confirmed:
         beginner_eligible = True
+
     return is_confirmed, bonus_block, beginner_eligible
 
 def highest_bonus_rank(hist: pd.DataFrame, creator_id: str) -> int:
@@ -151,6 +161,7 @@ def compute_creators(df,hist):
         amount=float(r['diamants'])
         statut = r.get('statut_diplome','')
         confirmed_by_status, bonus_block, beginner_eligible = status_flags(statut)
+
         if confirmed_by_status:
             ctype='confirmé'
         else:
@@ -159,14 +170,18 @@ def compute_creators(df,hist):
                 h = hist[hist['creator_id']==r['creator_id']]
                 if not h.empty and h['diamants'].max()>=THR_CONFIRMED: ever=True
             ctype='confirmé' if ever else 'débutant'
+
         ok1,ok2,why=activity_ok(r,ctype)
+
         actif_hierarchie = (ok1 or ok2) and (amount >= 750)
         force_inactive = amount < 35000
+
         requires_second = amount>=THR_CONFIRMED
         p1 = reward(amount,P1) if ok1 and (not requires_second or (requires_second and not ok2)) else 0.0
         p2 = reward(amount,P2) if (requires_second and ok2) else 0.0
         if requires_second and ok2: p1=0.0
         if force_inactive: p1 = 0.0; p2 = 0.0
+
         bval,bcode=0.0,''
         if (ctype=='débutant') and beginner_eligible and not bonus_block:
             hist_rank = highest_bonus_rank(hist, r['creator_id'])
@@ -177,11 +192,14 @@ def compute_creators(df,hist):
             if RANK.get(curr_code,0) > hist_rank:
                 bcode=curr_code
                 bval = 500 if curr_code=='B1' else 1088 if curr_code=='B2' else 3000 if curr_code=='B3' else 0.0
+
         total=float(p1+p2+bval)
         if amount>=2_000_000: total=float(np.floor(total/1000)*1000)
+
         etat='✅ Actif' if (p1>0 or p2>0) else '⚠️ Inactif'
-        if force_inactive: etat='⚠️ Inactif'; why = 'Diamants < 35 000'
+        if force_inactive: etat='⚠️ Inactif'; why = "Diamants < 35 000"
         reason='' if etat=='✅ Actif' else why
+
         rows.append({
             'creator_id':r['creator_id'],'creator_username':r['creator_username'],'groupe':r['groupe'],'agent':r['agent'],
             'periode':r['periode'],'diamants':amount,'jours_live':r['jours_live'],'heures_live':r['heures_live'],
@@ -294,7 +312,7 @@ if f_cur:
         st.download_button('CSV Managers',man.to_csv(index=False).encode('utf-8'),'recompenses_managers.csv','text/csv')
         safe_pdf('PDF Managers','Récompenses Managers',man,'recompenses_managers.pdf')
 
-st.markdown("""
+st.markdown(\"\"\"
 <style>
 #MainMenu {visibility: visible !important;}
 footer {visibility:hidden;}
@@ -302,4 +320,4 @@ footer {visibility:hidden;}
 padding: 6px 12px; text-align: center; background: rgba(0,0,0,0.05); font-size: 12px;}
 </style>
 <div class='app-footer'>logiciels récompense by tom Consulting & Event</div>
-""", unsafe_allow_html=True)
+\"\"\", unsafe_allow_html=True)
