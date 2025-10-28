@@ -1,4 +1,8 @@
-# app.py — correctif ciblé statut/bonus (AL)
+# app.py — règle AL mise à jour (débutant non diplômé en 90 j)
+# - "recruté(e) comme non-débutant(e)" => Confirmé, aucun bonus
+# - "débutant(e) recruté(e) depuis + 90 j" => Confirmé, aucun bonus
+# - "débutant(e) non diplômé(e) en 90 j" => Débutant éligible au bonus
+# Autres calculs inchangés.
 import io, re, unicodedata
 import numpy as np
 import pandas as pd
@@ -93,26 +97,28 @@ def _norm(s: str) -> str:
     return s
 
 PLUS90 = re.compile(r'(?:\+|>|plus)\s*90')
+EN_90_RE = re.compile(r'(en\s+90\s*j)')
 
 def status_flags(statut_raw: str):
     s = _norm(statut_raw)
     is_confirmed = False
     bonus_block = False
-    is_beginner_90j = False
+    beginner_eligible = False
 
-    if 'confirme' in s:  # confirmé/confirmée
+    if 'confirme' in s:
         is_confirmed = True; bonus_block = True
 
-    if 'recrute' in s and 'non debutant' in s:  # recruté comme non-débutant
+    if 'recrute' in s and 'non debutant' in s:
         is_confirmed = True; bonus_block = True
 
-    if ('debutant' in s and 'depuis' in s and PLUS90.search(s)):  # débutant recruté depuis + 90 j
+    if ('debutant' in s and 'depuis' in s and PLUS90.search(s)):
         is_confirmed = True; bonus_block = True
 
-    if 'debutant' in s and '90' in s and not PLUS90.search(s) and not is_confirmed:  # <=90j débutant
-        is_beginner_90j = True
+    # Débutant non diplômé en 90 j => éligible bonus
+    if ('debutant' in s and 'non diplome' in s and EN_90_RE.search(s)) and not is_confirmed:
+        beginner_eligible = True
 
-    return is_confirmed, bonus_block, is_beginner_90j
+    return is_confirmed, bonus_block, beginner_eligible
 
 def creator_type(row, hist):
     statut = row.get('statut_diplome','')
@@ -154,7 +160,7 @@ def compute_creators(df,hist):
     for _,r in df.iterrows():
         amount=float(r['diamants'])
         statut = r.get('statut_diplome','')
-        confirmed_by_status, bonus_block, beginner90 = status_flags(statut)
+        confirmed_by_status, bonus_block, beginner_eligible = status_flags(statut)
 
         # type par statut prioritaire, sinon historique >=150k
         if confirmed_by_status:
@@ -180,9 +186,9 @@ def compute_creators(df,hist):
         if requires_second and ok2: p1=0.0
         if force_inactive: p1 = 0.0; p2 = 0.0
 
-        # bonus débutant uniquement si ctype débutant, beginner90 True, pas de blocage et jamais attribué
+        # bonus débutant uniquement si ctype débutant, beginner_eligible True, pas de blocage et jamais attribué
         bval,bcode=0.0,''
-        if (ctype=='débutant') and beginner90 and not bonus_block and not has_historical_bonus(hist,r['creator_id']):
+        if (ctype=='débutant') and beginner_eligible and not bonus_block and not has_historical_bonus(hist,r['creator_id']):
             for b in BONUS_CREATOR:
                 if amount>=b['min'] and amount<=b['max']:
                     bval,bcode=b['bonus'],b['code']; break
