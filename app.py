@@ -314,4 +314,4 @@ footer {visibility:hidden;}
 padding: 6px 12px; text-align: center; background: rgba(0,0,0,0.05); font-size: 12px;}
 </style>
 <div class='app-footer'>logiciels récompense by tom Consulting & Event</div>
-\"\"\", unsafe_allow_html=True)
+""", unsafe_allow_html=True)
