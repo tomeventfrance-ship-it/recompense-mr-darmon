@@ -1,8 +1,4 @@
-# app.py — règle AL mise à jour (débutant non diplômé en 90 j)
-# - "recruté(e) comme non-débutant(e)" => Confirmé, aucun bonus
-# - "débutant(e) recruté(e) depuis + 90 j" => Confirmé, aucun bonus
-# - "débutant(e) non diplômé(e) en 90 j" => Débutant éligible au bonus
-# Autres calculs inchangés.
+# app.py — règle AL + bonus progressif
 import io, re, unicodedata
 import numpy as np
 import pandas as pd
@@ -12,7 +8,7 @@ from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 
-st.set_page_config(page_title="Monsieur Darmon", layout="wide")
+st.set_page_config(page_title='Monsieur Darmon', layout='wide')
 
 try:
     import ui_theme
@@ -42,7 +38,9 @@ def parse_duration_to_hours(x) -> float:
         h = parts[0]; m = parts[1] if len(parts)>1 else 0; sec = parts[2] if len(parts)>2 else 0
         return h + m/60 + sec/3600
     h = re.search(r'(\d+)\s*h', s); m = re.search(r'(\d+)\s*m', s)
-    if h or m: return (int(h.group(1)) if h else 0) + (int(m.group(1)) if m else 0)/60
+    if h or m:
+        hh = int(h.group(1)) if h else 0; mm = int(m.group(1)) if m else 0
+        return hh + mm/60
     mm = re.search(r'(\d+)\s*min', s)
     if mm: return int(mm.group(1))/60
     return 0.0
@@ -86,9 +84,7 @@ P2=[(35000,74999,1000),(75000,149999,2500),(150000,199999,6000),(200000,299999,7
     (700000,799999,26999),(800000,899999,30000),(900000,999999,35000),(1000000,1499999,39999),
     (1500000,1999999,59999),(2000000,None,'PCT4')]
 
-BONUS_CREATOR=[{'min':75000,'max':149999,'bonus':500,'code':'B1'},
-               {'min':150000,'max':499999,'bonus':1088,'code':'B2'},
-               {'min':500000,'max':2000000,'bonus':3000,'code':'B3'}]
+RANK={'':0,'B1':1,'B2':2,'B3':3}
 
 def _norm(s: str) -> str:
     s = unicodedata.normalize('NFKD', s or '').encode('ascii', 'ignore').decode('ascii')
@@ -97,28 +93,31 @@ def _norm(s: str) -> str:
     return s
 
 PLUS90 = re.compile(r'(?:\+|>|plus)\s*90')
-EN_90_RE = re.compile(r'(en\s+90\s*j)')
+EN_90_RE = re.compile(r'(?:\ben\s+90\s*j\b|en 90j)')
 
 def status_flags(statut_raw: str):
     s = _norm(statut_raw)
     is_confirmed = False
     bonus_block = False
     beginner_eligible = False
-
     if 'confirme' in s:
         is_confirmed = True; bonus_block = True
-
     if 'recrute' in s and 'non debutant' in s:
         is_confirmed = True; bonus_block = True
-
     if ('debutant' in s and 'depuis' in s and PLUS90.search(s)):
         is_confirmed = True; bonus_block = True
-
-    # Débutant non diplômé en 90 j => éligible bonus
     if ('debutant' in s and 'non diplome' in s and EN_90_RE.search(s)) and not is_confirmed:
         beginner_eligible = True
-
     return is_confirmed, bonus_block, beginner_eligible
+
+def highest_bonus_rank(hist: pd.DataFrame, creator_id: str) -> int:
+    if hist is None or hist.empty: return 0
+    h = hist[hist.get('creator_id','').astype(str)==str(creator_id)]
+    if h.empty: return 0
+    if 'bonus_code' in h.columns:
+        ranks = h['bonus_code'].astype(str).str.upper().map(RANK).fillna(0)
+        return int(ranks.max())
+    return 0
 
 def creator_type(row, hist):
     statut = row.get('statut_diplome','')
@@ -146,23 +145,12 @@ def reward(amount,table):
             return round(amount*0.04,2) if val=='PCT4' else float(val)
     return 0.0
 
-def has_historical_bonus(hist: pd.DataFrame, creator_id: str) -> bool:
-    if hist is None or hist.empty: return False
-    h = hist[hist.get('creator_id','').astype(str)==str(creator_id)]
-    if h.empty: return False
-    if 'bonus_code' in h.columns:
-        codes = h['bonus_code'].astype(str).str.upper().tolist()
-        return any(c in {'B1','B2','B3'} for c in codes)
-    return False
-
 def compute_creators(df,hist):
     rows=[]
     for _,r in df.iterrows():
         amount=float(r['diamants'])
         statut = r.get('statut_diplome','')
         confirmed_by_status, bonus_block, beginner_eligible = status_flags(statut)
-
-        # type par statut prioritaire, sinon historique >=150k
         if confirmed_by_status:
             ctype='confirmé'
         else:
@@ -171,35 +159,29 @@ def compute_creators(df,hist):
                 h = hist[hist['creator_id']==r['creator_id']]
                 if not h.empty and h['diamants'].max()>=THR_CONFIRMED: ever=True
             ctype='confirmé' if ever else 'débutant'
-
         ok1,ok2,why=activity_ok(r,ctype)
-
-        # actif hiérarchique = jours/heures OK et >= 750
         actif_hierarchie = (ok1 or ok2) and (amount >= 750)
-
-        # inactif créateur < 35k
         force_inactive = amount < 35000
-
         requires_second = amount>=THR_CONFIRMED
         p1 = reward(amount,P1) if ok1 and (not requires_second or (requires_second and not ok2)) else 0.0
         p2 = reward(amount,P2) if (requires_second and ok2) else 0.0
         if requires_second and ok2: p1=0.0
         if force_inactive: p1 = 0.0; p2 = 0.0
-
-        # bonus débutant uniquement si ctype débutant, beginner_eligible True, pas de blocage et jamais attribué
         bval,bcode=0.0,''
-        if (ctype=='débutant') and beginner_eligible and not bonus_block and not has_historical_bonus(hist,r['creator_id']):
-            for b in BONUS_CREATOR:
-                if amount>=b['min'] and amount<=b['max']:
-                    bval,bcode=b['bonus'],b['code']; break
-
-        total=p1+p2+bval
+        if (ctype=='débutant') and beginner_eligible and not bonus_block:
+            hist_rank = highest_bonus_rank(hist, r['creator_id'])
+            curr_code=''
+            if   75000 <= amount <= 149999:  curr_code='B1'
+            elif 150000 <= amount <= 499999: curr_code='B2'
+            elif 500000 <= amount <= 2000000: curr_code='B3'
+            if RANK.get(curr_code,0) > hist_rank:
+                bcode=curr_code
+                bval = 500 if curr_code=='B1' else 1088 if curr_code=='B2' else 3000 if curr_code=='B3' else 0.0
+        total=float(p1+p2+bval)
         if amount>=2_000_000: total=float(np.floor(total/1000)*1000)
-
         etat='✅ Actif' if (p1>0 or p2>0) else '⚠️ Inactif'
-        if force_inactive: etat='⚠️ Inactif'; why = "Diamants < 35 000"
+        if force_inactive: etat='⚠️ Inactif'; why = 'Diamants < 35 000'
         reason='' if etat=='✅ Actif' else why
-
         rows.append({
             'creator_id':r['creator_id'],'creator_username':r['creator_username'],'groupe':r['groupe'],'agent':r['agent'],
             'periode':r['periode'],'diamants':amount,'jours_live':r['jours_live'],'heures_live':r['heures_live'],
