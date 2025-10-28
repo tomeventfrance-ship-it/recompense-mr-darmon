@@ -1,5 +1,5 @@
-# app.py — correctifs : bonus A/M non nuls + statut "recruté comme non débutant" = confirmé
-import io, re
+# app.py — correctif ciblé statut/bonus (AL)
+import io, re, unicodedata
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -10,20 +10,16 @@ from reportlab.lib.styles import getSampleStyleSheet
 
 st.set_page_config(page_title="Monsieur Darmon", layout="wide")
 
-# Thème
 try:
     import ui_theme
     ui_theme.apply_theme()
 except Exception:
     pass
 
-# ---------- I/O ----------
 @st.cache_data(show_spinner=False)
 def read_any(file_bytes: bytes, name: str) -> pd.DataFrame:
-    bio = io.BytesIO(file_bytes)
-    n = name.lower()
-    if n.endswith(('.xlsx', '.xls')):
-        return pd.read_excel(bio)
+    bio = io.BytesIO(file_bytes); n = name.lower()
+    if n.endswith(('.xlsx', '.xls')): return pd.read_excel(bio)
     return pd.read_csv(bio)
 
 def to_numeric_safe(x):
@@ -42,14 +38,11 @@ def parse_duration_to_hours(x) -> float:
         h = parts[0]; m = parts[1] if len(parts)>1 else 0; sec = parts[2] if len(parts)>2 else 0
         return h + m/60 + sec/3600
     h = re.search(r'(\d+)\s*h', s); m = re.search(r'(\d+)\s*m', s)
-    if h or m:
-        hh = int(h.group(1)) if h else 0; mm = int(m.group(1)) if m else 0
-        return hh + mm/60
+    if h or m: return (int(h.group(1)) if h else 0) + (int(m.group(1)) if m else 0)/60
     mm = re.search(r'(\d+)\s*min', s)
     if mm: return int(mm.group(1))/60
     return 0.0
 
-# ---------- Normalisation ----------
 COLS = {
     'periode': "Période des données",
     'creator_username': "Nom d'utilisateur du/de la créateur(trice)",
@@ -77,11 +70,9 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
         out[c] = out[c].astype(str)
     return out
 
-# ---------- Paramètres ----------
 THR_CONFIRMED = 150000
 ACTIVITY = {'beginner':(7,15),'confirmed':(12,25),'second':(20,80)}
 
-# Barèmes créateurs
 P1=[(35000,74999,1000),(75000,149999,2500),(150000,199999,5000),(200000,299999,6000),
     (300000,399999,7999),(400000,499999,12000),(500000,599999,15000),(600000,699999,18000),
     (700000,799999,21000),(800000,899999,24000),(900000,999999,26999),(1000000,1499999,30000),
@@ -91,22 +82,46 @@ P2=[(35000,74999,1000),(75000,149999,2500),(150000,199999,6000),(200000,299999,7
     (700000,799999,26999),(800000,899999,30000),(900000,999999,35000),(1000000,1499999,39999),
     (1500000,1999999,59999),(2000000,None,'PCT4')]
 
-# Bonus créateurs
 BONUS_CREATOR=[{'min':75000,'max':149999,'bonus':500,'code':'B1'},
                {'min':150000,'max':499999,'bonus':1088,'code':'B2'},
                {'min':500000,'max':2000000,'bonus':3000,'code':'B3'}]
 
-# ---------- Logique ----------
+def _norm(s: str) -> str:
+    s = unicodedata.normalize('NFKD', s or '').encode('ascii', 'ignore').decode('ascii')
+    s = s.lower().replace('-', ' ').replace('(', ' ').replace(')', ' ')
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+PLUS90 = re.compile(r'(?:\+|>|plus)\s*90')
+
+def status_flags(statut_raw: str):
+    s = _norm(statut_raw)
+    is_confirmed = False
+    bonus_block = False
+    is_beginner_90j = False
+
+    if 'confirme' in s:  # confirmé/confirmée
+        is_confirmed = True; bonus_block = True
+
+    if 'recrute' in s and 'non debutant' in s:  # recruté comme non-débutant
+        is_confirmed = True; bonus_block = True
+
+    if ('debutant' in s and 'depuis' in s and PLUS90.search(s)):  # débutant recruté depuis + 90 j
+        is_confirmed = True; bonus_block = True
+
+    if 'debutant' in s and '90' in s and not PLUS90.search(s) and not is_confirmed:  # <=90j débutant
+        is_beginner_90j = True
+
+    return is_confirmed, bonus_block, is_beginner_90j
+
 def creator_type(row, hist):
-    statut = str(row.get('statut_diplome','')).lower()
+    statut = row.get('statut_diplome','')
+    confirmed_by_status, _, _ = status_flags(statut)
     ever = False
     if hist is not None and not hist.empty:
         h = hist[hist['creator_id']==row['creator_id']]
-        if not h.empty and h['diamants'].max()>=THR_CONFIRMED:
-            ever = True
-    if ('confirm' in statut) or ('non débutant' in statut):
-        ever = True
-    return 'confirmé' if ever else 'débutant'
+        if not h.empty and h['diamants'].max()>=THR_CONFIRMED: ever = True
+    return 'confirmé' if (confirmed_by_status or ever) else 'débutant'
 
 def activity_ok(row, ctype):
     d = int(row.get('jours_live',0)); h = float(row.get('heures_live',0))
@@ -125,14 +140,6 @@ def reward(amount,table):
             return round(amount*0.04,2) if val=='PCT4' else float(val)
     return 0.0
 
-def eligible_beginner_status(row) -> bool:
-    statut = (row.get('statut_diplome','') or '').lower()
-    if ('non débutant' in statut) or ('confirm' in statut):
-        return False
-    if 'débutant' not in statut:
-        return False
-    return ('90' in statut)
-
 def has_historical_bonus(hist: pd.DataFrame, creator_id: str) -> bool:
     if hist is None or hist.empty: return False
     h = hist[hist.get('creator_id','').astype(str)==str(creator_id)]
@@ -146,22 +153,36 @@ def compute_creators(df,hist):
     rows=[]
     for _,r in df.iterrows():
         amount=float(r['diamants'])
-        ctype=creator_type(r,hist)
+        statut = r.get('statut_diplome','')
+        confirmed_by_status, bonus_block, beginner90 = status_flags(statut)
+
+        # type par statut prioritaire, sinon historique >=150k
+        if confirmed_by_status:
+            ctype='confirmé'
+        else:
+            ever=False
+            if hist is not None and not hist.empty:
+                h = hist[hist['creator_id']==r['creator_id']]
+                if not h.empty and h['diamants'].max()>=THR_CONFIRMED: ever=True
+            ctype='confirmé' if ever else 'débutant'
+
         ok1,ok2,why=activity_ok(r,ctype)
 
+        # actif hiérarchique = jours/heures OK et >= 750
         actif_hierarchie = (ok1 or ok2) and (amount >= 750)
+
+        # inactif créateur < 35k
         force_inactive = amount < 35000
 
         requires_second = amount>=THR_CONFIRMED
         p1 = reward(amount,P1) if ok1 and (not requires_second or (requires_second and not ok2)) else 0.0
         p2 = reward(amount,P2) if (requires_second and ok2) else 0.0
         if requires_second and ok2: p1=0.0
+        if force_inactive: p1 = 0.0; p2 = 0.0
 
-        if force_inactive:
-            p1 = 0.0; p2 = 0.0
-
+        # bonus débutant uniquement si ctype débutant, beginner90 True, pas de blocage et jamais attribué
         bval,bcode=0.0,''
-        if (ctype=='débutant') and eligible_beginner_status(r) and not has_historical_bonus(hist,r['creator_id']):
+        if (ctype=='débutant') and beginner90 and not bonus_block and not has_historical_bonus(hist,r['creator_id']):
             for b in BONUS_CREATOR:
                 if amount>=b['min'] and amount<=b['max']:
                     bval,bcode=b['bonus'],b['code']; break
@@ -170,8 +191,7 @@ def compute_creators(df,hist):
         if amount>=2_000_000: total=float(np.floor(total/1000)*1000)
 
         etat='✅ Actif' if (p1>0 or p2>0) else '⚠️ Inactif'
-        if force_inactive:
-            etat='⚠️ Inactif'; why = "Diamants < 35 000"
+        if force_inactive: etat='⚠️ Inactif'; why = "Diamants < 35 000"
         reason='' if etat=='✅ Actif' else why
 
         rows.append({
@@ -245,7 +265,6 @@ def safe_pdf(label,title,df,file):
     if df is None or df.empty: st.button(label,disabled=True)
     else: st.download_button(label,make_pdf(title,df),file,'application/pdf')
 
-# ---------- UI ----------
 st.markdown("<h1 style='text-align:center;margin:0 0 10px;'>Monsieur Darmon</h1>", unsafe_allow_html=True)
 
 c1,c2,c3,c4=st.columns(4)
@@ -287,7 +306,7 @@ if f_cur:
         st.download_button('CSV Managers',man.to_csv(index=False).encode('utf-8'),'recompenses_managers.csv','text/csv')
         safe_pdf('PDF Managers','Récompenses Managers',man,'recompenses_managers.pdf')
 
-st.markdown("""
+st.markdown(\"\"\"
 <style>
 #MainMenu {visibility: visible !important;}
 footer {visibility:hidden;}
@@ -295,4 +314,4 @@ footer {visibility:hidden;}
 padding: 6px 12px; text-align: center; background: rgba(0,0,0,0.05); font-size: 12px;}
 </style>
 <div class='app-footer'>logiciels récompense by tom Consulting & Event</div>
-""", unsafe_allow_html=True)
+\"\"\", unsafe_allow_html=True)
