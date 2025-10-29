@@ -1,4 +1,4 @@
-# app.py — Toggles admin + historique + facture € sur base_prime
+# app.py — Monsieur Darmon (admin par e‑mail, validations, historiques)
 import io, re, unicodedata, os
 from datetime import datetime
 from pathlib import Path
@@ -10,24 +10,55 @@ from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 
+# -----------------------------------------------------------------------------
+# Configuration
+# -----------------------------------------------------------------------------
 st.set_page_config(page_title="Monsieur Darmon", layout="wide")
 
+# Thème facultatif
 try:
-    import ui_theme
+    import ui_theme  # fichier séparé
     ui_theme.apply_theme()
 except Exception:
     pass
 
-def is_admin() -> bool:
-    try:
-        return bool(st.secrets.get("access", {}).get("admin_mode", False))
-    except Exception:
-        return False
+# Dossiers
+HIST_DIR = Path("data/historique")
+HIST_DIR.mkdir(parents=True, exist_ok=True)
+HIST_FILE = HIST_DIR / "historique_createurs.csv"
 
+# -----------------------------------------------------------------------------
+# Outils accès/identité
+# -----------------------------------------------------------------------------
+import re, os
+
+def _get_user_email() -> str:
+    try:
+        u = st.experimental_user  # Streamlit Cloud
+        return (u.email or "").strip().lower() if u else ""
+    except Exception:
+        return ""
+
+def is_admin() -> bool:
+    email = _get_user_email()
+    admin_secret = str(st.secrets.get("ADMIN_EMAIL", "")).strip().lower()
+    admin_mode = bool(st.secrets.get("access", {}).get("admin_mode", False))
+    return bool(admin_mode and admin_secret and email == admin_secret)
+
+def is_manager() -> bool:
+    email = _get_user_email()
+    allowed = str(st.secrets.get("MANAGER_EMAILS", "")).lower()
+    allowed_list = [e.strip() for e in re.split(r"[,\s]+", allowed) if e.strip()]
+    return email in allowed_list
+
+# -----------------------------------------------------------------------------
+# I/O
+# -----------------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def read_any(file_bytes: bytes, name: str) -> pd.DataFrame:
     bio = io.BytesIO(file_bytes); n = name.lower()
-    if n.endswith(('.xlsx', '.xls')): return pd.read_excel(bio)
+    if n.endswith(('.xlsx', '.xls')): 
+        return pd.read_excel(bio)
     return pd.read_csv(bio)
 
 def to_numeric_safe(x):
@@ -53,6 +84,9 @@ def parse_duration_to_hours(x) -> float:
     if mm: return int(mm.group(1))/60
     return 0.0
 
+# -----------------------------------------------------------------------------
+# Normalisation colonnes
+# -----------------------------------------------------------------------------
 COLS = {
     'periode': "Période des données",
     'creator_username': "Nom d'utilisateur du/de la créateur(trice)",
@@ -75,14 +109,19 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
         out['heures_live'] = df[COLS['duree_live']].apply(parse_duration_to_hours)
     else:
         out['heures_live'] = 0.0
+    # ID créateur si dispo sinon username
     out['creator_id'] = df.get('ID créateur(trice)', out['creator_username']).astype(str)
     for c in ['creator_username','groupe','agent','statut_diplome','periode','date_relation']:
         out[c] = out[c].astype(str)
     return out
 
+# -----------------------------------------------------------------------------
+# Règles
+# -----------------------------------------------------------------------------
 THR_CONFIRMED = 150000
 ACTIVITY = {'beginner':(7,15),'confirmed':(12,25),'second':(20,80)}
 
+# Barèmes
 P1=[(35000,74999,1000),(75000,149999,2500),(150000,199999,5000),(200000,299999,6000),
     (300000,399999,7999),(400000,499999,12000),(500000,599999,15000),(600000,699999,18000),
     (700000,799999,21000),(800000,899999,24000),(900000,999999,26999),(1000000,1499999,30000),
@@ -92,7 +131,7 @@ P2=[(35000,74999,1000),(75000,149999,2500),(150000,199999,6000),(200000,299999,7
     (700000,799999,26999),(800000,899999,30000),(900000,999999,35000),(1000000,1499999,39999),
     (1500000,1999999,59999),(2000000,None,'PCT4')]
 
-RANK={'':0,'B1':1,'B2':2,'B3':3}
+BONUS_RANK={'':0,'B1':1,'B2':2,'B3':3}
 
 def _norm(s: str) -> str:
     s = unicodedata.normalize('NFKD', s or '').encode('ascii', 'ignore').decode('ascii')
@@ -120,18 +159,9 @@ def highest_bonus_rank(hist: pd.DataFrame, creator_id: str) -> int:
     h = hist[hist.get('creator_id','').astype(str)==str(creator_id)]
     if h.empty: return 0
     if 'bonus_code' in h.columns:
-        ranks = h['bonus_code'].astype(str).str.upper().map(RANK).fillna(0)
+        ranks = h['bonus_code'].astype(str).str.upper().map(BONUS_RANK).fillna(0)
         return int(ranks.max())
     return 0
-
-def creator_type(row, hist):
-    statut = row.get('statut_diplome','')
-    confirmed_by_status, _, _ = status_flags(statut)
-    ever = False
-    if hist is not None and not hist.empty:
-        h = hist[hist['creator_id']==row['creator_id']]
-        if not h.empty and h['diamants'].max()>=THR_CONFIRMED: ever = True
-    return 'confirmé' if (confirmed_by_status or ever) else 'débutant'
 
 def activity_ok(row, ctype):
     d = int(row.get('jours_live',0)); h = float(row.get('heures_live',0))
@@ -150,20 +180,35 @@ def reward(amount,table):
             return round(amount*0.04,2) if val=='PCT4' else float(val)
     return 0.0
 
+def creator_type_and_bonus(row, hist):
+    amount=float(row['diamants'])
+    statut=row.get('statut_diplome','')
+    confirmed_by_status, bonus_block, beginner_eligible = status_flags(statut)
+    # type
+    if confirmed_by_status:
+        ctype='confirmé'
+    else:
+        ever=False
+        if hist is not None and not hist.empty:
+            h = hist[hist['creator_id']==row['creator_id']]
+            if not h.empty and h['diamants'].max()>=THR_CONFIRMED: ever=True
+        ctype='confirmé' if ever else 'débutant'
+
+    # bonus courant
+    curr_code=''
+    if   75000 <= amount <= 149999:  curr_code='B1'
+    elif 150000 <= amount <= 499999: curr_code='B2'
+    elif 500000 <= amount <= 2000000: curr_code='B3'
+    hist_rank = highest_bonus_rank(hist, row['creator_id'])
+    can_bonus = (ctype=='débutant') and beginner_eligible and not bonus_block and BONUS_RANK.get(curr_code,0)>hist_rank
+    bval = 500 if curr_code=='B1' else 1088 if curr_code=='B2' else 3000 if curr_code=='B3' else 0.0
+    return ctype, (bval if can_bonus else 0.0), (curr_code if can_bonus else '')
+
 def compute_creators(df,hist):
     rows=[]
     for _,r in df.iterrows():
         amount=float(r['diamants'])
-        statut = r.get('statut_diplome','')
-        confirmed_by_status, bonus_block, beginner_eligible = status_flags(statut)
-        if confirmed_by_status:
-            ctype='confirmé'
-        else:
-            ever=False
-            if hist is not None and not hist.empty:
-                h = hist[hist['creator_id']==r['creator_id']]
-                if not h.empty and h['diamants'].max()>=THR_CONFIRMED: ever=True
-            ctype='confirmé' if ever else 'débutant'
+        ctype,bval,bcode = creator_type_and_bonus(r,hist)
         ok1,ok2,why=activity_ok(r,ctype)
         actif_hierarchie = (ok1 or ok2) and (amount >= 750)
         force_inactive = amount < 35000
@@ -172,25 +217,14 @@ def compute_creators(df,hist):
         p2 = reward(amount,P2) if (requires_second and ok2) else 0.0
         if requires_second and ok2: p1=0.0
         if force_inactive: p1 = 0.0; p2 = 0.0
-        bval,bcode=0.0,''
-        if (ctype=='débutant') and beginner_eligible and not bonus_block:
-            hist_rank = highest_bonus_rank(hist, r['creator_id'])
-            curr_code=''
-            if   75000 <= amount <= 149999:  curr_code='B1'
-            elif 150000 <= amount <= 499999: curr_code='B2'
-            elif 500000 <= amount <= 2000000: curr_code='B3'
-            if {'B1':1,'B2':2,'B3':3}.get(curr_code,0) > hist_rank:
-                bcode=curr_code
-                bval = 500 if curr_code=='B1' else 1088 if curr_code=='B2' else 3000 if curr_code=='B3' else 0.0
         total=float(p1+p2+bval)
         if amount>=2_000_000: total=float(np.floor(total/1000)*1000)
         etat='✅ Actif' if (p1>0 or p2>0) else '⚠️ Inactif'
         if force_inactive: etat='⚠️ Inactif'; why = "Diamants < 35 000"
-        reason='' if etat=='✅ Actif' else why
         rows.append({
             'creator_id':r['creator_id'],'creator_username':r['creator_username'],'groupe':r['groupe'],'agent':r['agent'],
             'periode':r['periode'],'diamants':amount,'jours_live':r['jours_live'],'heures_live':r['heures_live'],
-            'type_createur':ctype.capitalize(),'etat_activite':etat,'raison_ineligibilite':reason,
+            'type_createur':ctype.capitalize(),'etat_activite':etat,'raison_ineligibilite':why if etat!='✅ Actif' else '',
             'recompense_palier_1':p1,'recompense_palier_2':p2,'bonus_debutant':bval,'bonus_code':bcode,
             'total_createur':total,'actif_hierarchie':actif_hierarchie})
     return pd.DataFrame(rows)
@@ -243,6 +277,9 @@ def compute_managers(crea):
     cols = ['groupe','diamants_mois','base_prime','bonus_additionnel','prime_manager','Facture €']
     return out[cols]
 
+# -----------------------------------------------------------------------------
+# PDF
+# -----------------------------------------------------------------------------
 def make_pdf(title,df):
     buf=io.BytesIO()
     doc=SimpleDocTemplate(buf,pagesize=landscape(A4),leftMargin=18,rightMargin=18,topMargin=18,bottomMargin=18)
@@ -252,16 +289,18 @@ def make_pdf(title,df):
     t=Table(data,repeatRows=1)
     t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.black),('TEXTCOLOR',(0,0),(-1,0),colors.white),
         ('GRID',(0,0),(-1,-1),0.25,colors.grey),('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.whitesmoke,colors.lightgrey])]))
-    els.append(t); doc.build(els); buf.seek(0); return buf.read()
+    els.append(t)
+    doc.build(els)
+    buf.seek(0)
+    return buf.read()
 
 def safe_pdf(label,title,df,file):
     if df is None or df.empty: st.button(label,disabled=True)
     else: st.download_button(label,make_pdf(title,df),file,'application/pdf')
 
-HIST_DIR = Path("data/historique")
-HIST_DIR.mkdir(parents=True, exist_ok=True)
-HIST_FILE = HIST_DIR / "historique_createurs.csv"
-
+# -----------------------------------------------------------------------------
+# Historique validations
+# -----------------------------------------------------------------------------
 def load_validations() -> pd.DataFrame:
     if HIST_FILE.exists():
         try:
@@ -278,6 +317,9 @@ def save_validations(df_vals: pd.DataFrame):
                  .drop_duplicates(subset=['creator_id','periode'], keep='last'))
     allv.to_csv(HIST_FILE, index=False)
 
+# -----------------------------------------------------------------------------
+# UI
+# -----------------------------------------------------------------------------
 st.markdown("<h1 style='text-align:center;margin:0 0 10px;'>Monsieur Darmon</h1>", unsafe_allow_html=True)
 
 c1,c2,c3,c4=st.columns(4)
@@ -292,6 +334,7 @@ with c4:
         st.cache_data.clear(); st.rerun()
 
 if f_cur:
+    # lectures
     cur=normalize(read_any(f_cur.getvalue(),f_cur.name))
     hist=pd.DataFrame()
     if f_prev: hist=normalize(read_any(f_prev.getvalue(),f_prev.name))
@@ -307,10 +350,11 @@ if f_cur:
         st.download_button('CSV Créateurs',crea.to_csv(index=False).encode('utf-8'),'recompenses_createurs.csv','text/csv')
         safe_pdf('PDF Créateurs','Récompenses Créateurs',crea,'recompenses_createurs.pdf')
 
+        # ---- panneau admin UNIQUEMENT si is_admin() ----
         if is_admin():
-            st.markdown('<style>.valid-true {background-color: rgba(0,200,0,.08);} .valid-false {background: rgba(200,0,0,.06);}</style>', unsafe_allow_html=True)
             st.subheader("Validation admin")
             vals_old = load_validations()
+
             edit_df = crea[['creator_id','creator_username','periode','recompense_palier_1','recompense_palier_2','bonus_debutant']].copy()
             edit_df['valide_recompense'] = False
             edit_df['valide_bonus'] = False
@@ -328,8 +372,8 @@ if f_cur:
                 hide_index=True,
                 use_container_width=True,
                 column_config={
-                    "valide_recompense": st.column_config.CheckboxColumn("Valider récompense", help="Toggle de validation", default=False),
-                    "valide_bonus": st.column_config.CheckboxColumn("Valider bonus", help="Toggle de validation", default=False),
+                    "valide_recompense": st.column_config.CheckboxColumn("Valider récompense", default=False),
+                    "valide_bonus": st.column_config.CheckboxColumn("Valider bonus", default=False),
                 },
                 disabled=['creator_id','creator_username','periode','recompense_palier_1','recompense_palier_2','bonus_debutant'],
                 key="editor_validations"
@@ -356,6 +400,9 @@ if f_cur:
         st.download_button('CSV Managers',man.to_csv(index=False).encode('utf-8'),'recompenses_managers.csv','text/csv')
         safe_pdf('PDF Managers','Récompenses Managers',man,'recompenses_managers.pdf')
 
+# -----------------------------------------------------------------------------
+# Footer
+# -----------------------------------------------------------------------------
 st.markdown("""
 <style>
 #MainMenu {visibility: visible !important;}
@@ -364,4 +411,4 @@ footer {visibility:hidden;}
 padding: 6px 12px; text-align: center; background: rgba(0,0,0,0.05); font-size: 12px;}
 </style>
 <div class='app-footer'>logiciels récompense by tom Consulting & Event</div>
-""",unsafe_allow_html=True)
+""", unsafe_allow_html=True)
