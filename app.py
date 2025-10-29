@@ -1,5 +1,7 @@
-# app.py — correctif bonus 2: débutant(e) « en 90 j » éligible (diplômé(e) ou non), hors « depuis +90 j »
-import io, re, unicodedata
+# app.py — Toggles admin + historique + facture € sur base_prime
+import io, re, unicodedata, os
+from datetime import datetime
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -15,6 +17,12 @@ try:
     ui_theme.apply_theme()
 except Exception:
     pass
+
+def is_admin() -> bool:
+    try:
+        return bool(st.secrets.get("access", {}).get("admin_mode", False))
+    except Exception:
+        return False
 
 @st.cache_data(show_spinner=False)
 def read_any(file_bytes: bytes, name: str) -> pd.DataFrame:
@@ -84,9 +92,6 @@ P2=[(35000,74999,1000),(75000,149999,2500),(150000,199999,6000),(200000,299999,7
     (700000,799999,26999),(800000,899999,30000),(900000,999999,35000),(1000000,1499999,39999),
     (1500000,1999999,59999),(2000000,None,'PCT4')]
 
-BONUS_CREATOR=[{'min':75000,'max':149999,'bonus':500,'code':'B1'},
-               {'min':150000,'max':499999,'bonus':1088,'code':'B2'},
-               {'min':500000,'max':2000000,'bonus':3000,'code':'B3'}]
 RANK={'':0,'B1':1,'B2':2,'B3':3}
 
 def _norm(s: str) -> str:
@@ -96,28 +101,18 @@ def _norm(s: str) -> str:
     return s
 
 PLUS90 = re.compile(r'(?:\+|>|plus)\s*90')
-# Éligible si "debutant" ET mention de 90 j sans "+", tolère "en 90 j", "90j", "moins de 90 j"
-ELIG_90 = re.compile(r'(?:en|moins\s+de)?\s*90\s*j')
+ELIG_90 = re.compile(r'(?:\ben\s+90\s*j\b|en 90j|90\s*j\b|moins\s+de\s+90\s*j)')
 
 def status_flags(statut_raw: str):
     s = _norm(statut_raw)
     is_confirmed = False
     bonus_block = False
     beginner_eligible = False
-
-    if 'confirme' in s:
-        is_confirmed = True; bonus_block = True
-
-    if 'recrute' in s and 'non debutant' in s:
-        is_confirmed = True; bonus_block = True
-
-    if ('debutant' in s and 'depuis' in s and PLUS90.search(s)):
-        is_confirmed = True; bonus_block = True
-
-    # Débutant dans fenêtre 90 j (diplômé ou non), sans "+90"
+    if 'confirme' in s: is_confirmed = True; bonus_block = True
+    if 'recrute' in s and 'non debutant' in s: is_confirmed = True; bonus_block = True
+    if ('debutant' in s and 'depuis' in s and PLUS90.search(s)): is_confirmed = True; bonus_block = True
     if ('debutant' in s) and ELIG_90.search(s) and not PLUS90.search(s) and 'depuis' not in s and not is_confirmed:
         beginner_eligible = True
-
     return is_confirmed, bonus_block, beginner_eligible
 
 def highest_bonus_rank(hist: pd.DataFrame, creator_id: str) -> int:
@@ -161,7 +156,6 @@ def compute_creators(df,hist):
         amount=float(r['diamants'])
         statut = r.get('statut_diplome','')
         confirmed_by_status, bonus_block, beginner_eligible = status_flags(statut)
-
         if confirmed_by_status:
             ctype='confirmé'
         else:
@@ -170,18 +164,14 @@ def compute_creators(df,hist):
                 h = hist[hist['creator_id']==r['creator_id']]
                 if not h.empty and h['diamants'].max()>=THR_CONFIRMED: ever=True
             ctype='confirmé' if ever else 'débutant'
-
         ok1,ok2,why=activity_ok(r,ctype)
-
         actif_hierarchie = (ok1 or ok2) and (amount >= 750)
         force_inactive = amount < 35000
-
         requires_second = amount>=THR_CONFIRMED
         p1 = reward(amount,P1) if ok1 and (not requires_second or (requires_second and not ok2)) else 0.0
         p2 = reward(amount,P2) if (requires_second and ok2) else 0.0
         if requires_second and ok2: p1=0.0
         if force_inactive: p1 = 0.0; p2 = 0.0
-
         bval,bcode=0.0,''
         if (ctype=='débutant') and beginner_eligible and not bonus_block:
             hist_rank = highest_bonus_rank(hist, r['creator_id'])
@@ -189,17 +179,14 @@ def compute_creators(df,hist):
             if   75000 <= amount <= 149999:  curr_code='B1'
             elif 150000 <= amount <= 499999: curr_code='B2'
             elif 500000 <= amount <= 2000000: curr_code='B3'
-            if RANK.get(curr_code,0) > hist_rank:
+            if {'B1':1,'B2':2,'B3':3}.get(curr_code,0) > hist_rank:
                 bcode=curr_code
                 bval = 500 if curr_code=='B1' else 1088 if curr_code=='B2' else 3000 if curr_code=='B3' else 0.0
-
         total=float(p1+p2+bval)
         if amount>=2_000_000: total=float(np.floor(total/1000)*1000)
-
         etat='✅ Actif' if (p1>0 or p2>0) else '⚠️ Inactif'
         if force_inactive: etat='⚠️ Inactif'; why = "Diamants < 35 000"
         reason='' if etat=='✅ Actif' else why
-
         rows.append({
             'creator_id':r['creator_id'],'creator_username':r['creator_username'],'groupe':r['groupe'],'agent':r['agent'],
             'periode':r['periode'],'diamants':amount,'jours_live':r['jours_live'],'heures_live':r['heures_live'],
@@ -238,7 +225,7 @@ def compute_agents(crea):
     out['prime_agent']=out['base_prime']+out['bonus_additionnel']
     out['prime_agent']=(np.floor(out['prime_agent']/1000)*1000).astype(int)
     out.rename(columns={'diamants_hierarchie':'diamants_mois'},inplace=True)
-    out['Facture €'] = (np.floor((out['prime_agent'] * 0.0084) / 5) * 5).astype(int)
+    out['Facture €'] = (np.floor((out['base_prime'] * 0.0084) / 5) * 5).astype(int)
     cols = ['agent','diamants_mois','base_prime','bonus_additionnel','prime_agent','Facture €']
     return out[cols]
 
@@ -252,7 +239,7 @@ def compute_managers(crea):
     out['prime_manager']=out['base_prime']+out['bonus_additionnel']
     out['prime_manager']=(np.floor(out['prime_manager']/1000)*1000).astype(int)
     out.rename(columns={'diamants_hierarchie':'diamants_mois'},inplace=True)
-    out['Facture €'] = (np.floor((out['prime_manager'] * 0.0084) / 5) * 5).astype(int)
+    out['Facture €'] = (np.floor((out['base_prime'] * 0.0084) / 5) * 5).astype(int)
     cols = ['groupe','diamants_mois','base_prime','bonus_additionnel','prime_manager','Facture €']
     return out[cols]
 
@@ -270,6 +257,26 @@ def make_pdf(title,df):
 def safe_pdf(label,title,df,file):
     if df is None or df.empty: st.button(label,disabled=True)
     else: st.download_button(label,make_pdf(title,df),file,'application/pdf')
+
+HIST_DIR = Path("data/historique")
+HIST_DIR.mkdir(parents=True, exist_ok=True)
+HIST_FILE = HIST_DIR / "historique_createurs.csv"
+
+def load_validations() -> pd.DataFrame:
+    if HIST_FILE.exists():
+        try:
+            return pd.read_csv(HIST_FILE, dtype=str)
+        except Exception:
+            return pd.DataFrame(columns=['creator_id','periode','valide_recompense','valide_bonus','timestamp_iso'])
+    return pd.DataFrame(columns=['creator_id','periode','valide_recompense','valide_bonus','timestamp_iso'])
+
+def save_validations(df_vals: pd.DataFrame):
+    prev = load_validations()
+    allv = pd.concat([prev, df_vals], ignore_index=True)
+    allv['timestamp_iso'] = allv['timestamp_iso'].fillna(datetime.utcnow().isoformat())
+    allv = (allv.sort_values('timestamp_iso')
+                 .drop_duplicates(subset=['creator_id','periode'], keep='last'))
+    allv.to_csv(HIST_FILE, index=False)
 
 st.markdown("<h1 style='text-align:center;margin:0 0 10px;'>Monsieur Darmon</h1>", unsafe_allow_html=True)
 
@@ -299,6 +306,43 @@ if f_cur:
         st.dataframe(crea,use_container_width=True)
         st.download_button('CSV Créateurs',crea.to_csv(index=False).encode('utf-8'),'recompenses_createurs.csv','text/csv')
         safe_pdf('PDF Créateurs','Récompenses Créateurs',crea,'recompenses_createurs.pdf')
+
+        if is_admin():
+            st.markdown('<style>.valid-true {background-color: rgba(0,200,0,.08);} .valid-false {background: rgba(200,0,0,.06);}</style>', unsafe_allow_html=True)
+            st.subheader("Validation admin")
+            vals_old = load_validations()
+            edit_df = crea[['creator_id','creator_username','periode','recompense_palier_1','recompense_palier_2','bonus_debutant']].copy()
+            edit_df['valide_recompense'] = False
+            edit_df['valide_bonus'] = False
+            if not vals_old.empty:
+                m = vals_old[['creator_id','periode','valide_recompense','valide_bonus']].copy()
+                m['valide_recompense'] = m['valide_recompense'].astype(str).str.lower().isin(['true','1','yes','oui'])
+                m['valide_bonus'] = m['valide_bonus'].astype(str).str.lower().isin(['true','1','yes','oui'])
+                edit_df = edit_df.merge(m, on=['creator_id','periode'], how='left', suffixes=('','_hist'))
+                edit_df['valide_recompense'] = np.where(edit_df['valide_recompense_hist'].notna(), edit_df['valide_recompense_hist'], edit_df['valide_recompense'])
+                edit_df['valide_bonus'] = np.where(edit_df['valide_bonus_hist'].notna(), edit_df['valide_bonus_hist'], edit_df['valide_bonus'])
+                edit_df.drop(columns=['valide_recompense_hist','valide_bonus_hist'], inplace=True)
+
+            edited = st.data_editor(
+                edit_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "valide_recompense": st.column_config.CheckboxColumn("Valider récompense", help="Toggle de validation", default=False),
+                    "valide_bonus": st.column_config.CheckboxColumn("Valider bonus", help="Toggle de validation", default=False),
+                },
+                disabled=['creator_id','creator_username','periode','recompense_palier_1','recompense_palier_2','bonus_debutant'],
+                key="editor_validations"
+            )
+
+            if st.button("Enregistrer les validations"):
+                out = edited[['creator_id','periode','valide_recompense','valide_bonus']].copy()
+                out['valide_recompense'] = out['valide_recompense'].astype(bool)
+                out['valide_bonus'] = out['valide_bonus'].astype(bool)
+                out['timestamp_iso'] = datetime.utcnow().isoformat()
+                save_validations(out)
+                try: st.toast("✅ Données enregistrées", icon="✅")
+                except Exception: st.success("Données enregistrées")
 
     with t2:
         ag=compute_agents(crea)
