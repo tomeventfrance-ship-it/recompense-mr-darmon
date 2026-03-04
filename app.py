@@ -116,167 +116,226 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 # -----------------------------------------------------------------------------
-# Règles
+# Règles (NOUVELLE RÉMUNÉRATION 2026)
 # -----------------------------------------------------------------------------
-THR_CONFIRMED = 150000
-ACTIVITY = {'beginner':(7,15),'confirmed':(12,25),'second':(20,80)}
+# Créateurs
+CREATOR_MIN_DIAMONDS = 100_000
 
-# Barèmes
-P1=[(35000,74999,1000),(75000,149999,2500),(150000,199999,5000),(200000,299999,6000),
-    (300000,399999,7999),(400000,499999,12000),(500000,599999,15000),(600000,699999,18000),
-    (700000,799999,21000),(800000,899999,24000),(900000,999999,26999),(1000000,1499999,30000),
-    (1500000,1999999,44999),(2000000,None,'PCT4')]
-P2=[(35000,74999,1000),(75000,149999,2500),(150000,199999,6000),(200000,299999,7999),
-    (300000,399999,12000),(400000,499999,15000),(500000,599999,20000),(600000,699999,24000),
-    (700000,799999,26999),(800000,899999,30000),(900000,999999,35000),(1000000,1499999,39999),
-    (1500000,1999999,59999),(2000000,None,'PCT4')]
+# Paliers activité (jours/heures -> %)
+CREATOR_ACTIVITY_LEVELS = [
+    {"label": "11j / 30h", "days": 11, "hours": 30, "rate": 0.01},
+    {"label": "18j / 60h", "days": 18, "hours": 60, "rate": 0.02},
+    {"label": "22j / 80h", "days": 22, "hours": 80, "rate": 0.03},
+]
 
-BONUS_RANK={'':0,'B1':1,'B2':2,'B3':3}
+# Niveaux diamants pour déterminer l'évolution/stagnation
+CREATOR_LEVEL_BASES = [100_000, 200_000, 300_000, 500_000, 700_000, 1_000_000, 1_600_000, 2_500_000, 5_000_000]
 
-def _norm(s: str) -> str:
-    s = unicodedata.normalize('NFKD', s or '').encode('ascii', 'ignore').decode('ascii')
-    s = s.lower().replace('-', ' ').replace('(', ' ').replace(')', ' ')
-    s = re.sub(r'\s+', ' ', s).strip()
-    return s
+# Bonus (non cumulable) ajouté AU POURCENTAGE (si éligible)
+CREATOR_BONUS_EVOLUTION = 0.02
+CREATOR_BONUS_STAGNATION = 0.01
 
-PLUS90 = re.compile(r'(?:\+|>|plus)\s*90')
-ELIG_90 = re.compile(r'(?:\ben\s+90\s*j\b|en 90j|90\s*j\b|moins\s+de\s+90\s*j)')
+# Bonus fixes 50K (uniquement sous 100K, pour éviter un cumul incohérent avec la rémunération %)
+CREATOR_FIXED_MIN = 50_000
+CREATOR_FIXED_11_30 = 500
+CREATOR_FIXED_22_80 = 1000
 
-def status_flags(statut_raw: str):
-    s = _norm(statut_raw)
-    is_confirmed = False
-    bonus_block = False
-    beginner_eligible = False
-    if 'confirme' in s: is_confirmed = True; bonus_block = True
-    if 'recrute' in s and 'non debutant' in s: is_confirmed = True; bonus_block = True
-    if ('debutant' in s and 'depuis' in s and PLUS90.search(s)): is_confirmed = True; bonus_block = True
-    if ('debutant' in s) and ELIG_90.search(s) and not PLUS90.search(s) and 'depuis' not in s and not is_confirmed:
-        beginner_eligible = True
-    return is_confirmed, bonus_block, beginner_eligible
+# Agents
+AGENT_MIN_DIAMONDS = 200_000  # non reportable
+AGENT_COMMISSION_BY_TASK = {"5%": 0.015, "7%": 0.02, "9%": 0.025}
+BONUS_CHOICES = {"0%": 0.0, "+0,5%": 0.005, "+1%": 0.01}  # non cumulable
 
-def highest_bonus_rank(hist: pd.DataFrame, creator_id: str) -> int:
-    if hist is None or hist.empty: return 0
-    h = hist[hist.get('creator_id','').astype(str)==str(creator_id)]
-    if h.empty: return 0
-    if 'bonus_code' in h.columns:
-        ranks = h['bonus_code'].astype(str).str.upper().map(BONUS_RANK).fillna(0)
-        return int(ranks.max())
-    return 0
+# Managers
+MANAGER_MIN_DIAMONDS = 1_000_000  # non reportable
+MANAGER_COMMISSION_BY_TASK = {"5%": 0.02, "7%": 0.03, "9%": 0.04}
 
-def activity_ok(row, ctype):
-    d = int(row.get('jours_live',0)); h = float(row.get('heures_live',0))
-    need_d,need_h = ACTIVITY['beginner'] if ctype=='débutant' else ACTIVITY['confirmed']
-    ok1=(d>=need_d and h>=need_h)
-    ok2=(d>=ACTIVITY['second'][0] and h>=ACTIVITY['second'][1])
-    reason=[]
-    if not ok1:
-        if d<need_d: reason.append('Pas assez de jours')
-        if h<need_h: reason.append("Pas assez d'heures")
-    return ok1,ok2,', '.join(reason)
+def floor_1000(x: float) -> int:
+    """Arrondi au millième inférieur."""
+    return int(x // 1000) * 1000
 
-def reward(amount,table):
-    for lo,hi,val in table:
-        if (hi is None and amount>=lo) or (amount>=lo and amount<=hi):
-            return round(amount*0.04,2) if val=='PCT4' else float(val)
-    return 0.0
+def floor_100(x: float) -> int:
+    """Arrondi à la centaine inférieure."""
+    return int(x // 100) * 100
 
-def creator_type_and_bonus(row, hist):
-    amount=float(row['diamants'])
-    statut=row.get('statut_diplome','')
-    confirmed_by_status, bonus_block, beginner_eligible = status_flags(statut)
-    # type
-    if confirmed_by_status:
-        ctype='confirmé'
-    else:
-        ever=False
-        if hist is not None and not hist.empty:
-            h = hist[hist['creator_id']==row['creator_id']]
-            if not h.empty and h['diamants'].max()>=THR_CONFIRMED: ever=True
-        ctype='confirmé' if ever else 'débutant'
+def creator_activity_rate(days: int, hours: float) -> float:
+    """Retourne le meilleur % d'activité atteint."""
+    rate = 0.0
+    for lvl in CREATOR_ACTIVITY_LEVELS:
+        if days >= lvl["days"] and hours >= lvl["hours"]:
+            rate = max(rate, lvl["rate"])
+    return rate
 
-    # bonus courant
-    curr_code=''
-    if   75000 <= amount <= 149999:  curr_code='B1'
-    elif 150000 <= amount <= 499999: curr_code='B2'
-    elif 500000 <= amount <= 2000000: curr_code='B3'
-    hist_rank = highest_bonus_rank(hist, row['creator_id'])
-    can_bonus = (ctype=='débutant') and beginner_eligible and not bonus_block and BONUS_RANK.get(curr_code,0)>hist_rank
-    bval = 500 if curr_code=='B1' else 1088 if curr_code=='B2' else 3000 if curr_code=='B3' else 0.0
-    return ctype, (bval if can_bonus else 0.0), (curr_code if can_bonus else '')
+def creator_level_index(diamonds: float) -> int:
+    """Index du niveau (0 si <100K)."""
+    d = float(diamonds or 0)
+    idx = 0
+    for base in CREATOR_LEVEL_BASES:
+        if d >= base:
+            idx += 1
+        else:
+            break
+    return idx  # 0..len(bases)
 
-def compute_creators(df,hist):
-    rows=[]
-    for _,r in df.iterrows():
-        amount=float(r['diamants'])
-        ctype,bval,bcode = creator_type_and_bonus(r,hist)
-        ok1,ok2,why=activity_ok(r,ctype)
-        actif_hierarchie = (ok1 or ok2) and (amount >= 750)
-        force_inactive = amount < 35000
-        requires_second = amount>=THR_CONFIRMED
-        p1 = reward(amount,P1) if ok1 and (not requires_second or (requires_second and not ok2)) else 0.0
-        p2 = reward(amount,P2) if (requires_second and ok2) else 0.0
-        if requires_second and ok2: p1=0.0
-        if force_inactive: p1 = 0.0; p2 = 0.0
-        total=float(p1+p2+bval)
-        if amount>=2_000_000: total=float(np.floor(total/1000)*1000)
-        etat='✅ Actif' if (p1>0 or p2>0) else '⚠️ Inactif'
-        if force_inactive: etat='⚠️ Inactif'; why = "Diamants < 35 000"
+def ever_passed_200k(creator_id: str, hist: pd.DataFrame) -> bool:
+    """Vrai si le créateur a déjà dépassé 200K dans l'historique fourni."""
+    if hist is None or hist.empty:
+        return False
+    h = hist[hist["creator_id"].astype(str) == str(creator_id)]
+    if h.empty:
+        return False
+    return float(h["diamants"].max() or 0) >= 200_000
+
+def prev_month_diamonds(creator_id: str, hist: pd.DataFrame) -> float:
+    """Diamants du mois précédent (approx : max période dans hist pour ce creator)."""
+    if hist is None or hist.empty:
+        return 0.0
+    h = hist[hist["creator_id"].astype(str) == str(creator_id)].copy()
+    if h.empty:
+        return 0.0
+    # On prend la dernière période lexicographiquement (souvent AAAA-MM)
+    h["periode"] = h["periode"].astype(str)
+    last = h.sort_values("periode").iloc[-1]
+    return float(last["diamants"] or 0.0)
+
+def compute_creators(df: pd.DataFrame, hist: pd.DataFrame) -> pd.DataFrame:
+    """Calcule les récompenses créateurs (nouvelle rémunération).
+
+    Colonnes conservées pour compatibilité UI/admin :
+    - recompense_palier_1 : récompense % (base)
+    - recompense_palier_2 : récompense fixe 50K (si applicable)
+    - bonus_debutant       : bonus % (évolution/stagnation) converti en diamants
+    - bonus_code           : 'EVOL' / 'STAG' / 'BAISSE' / ''
+    - total_createur       : total arrondi au millième inférieur
+    """
+    rows = []
+    hist = hist if hist is not None else pd.DataFrame()
+
+    for _, r in df.iterrows():
+        creator_id = str(r["creator_id"])
+        amount = float(r["diamants"] or 0.0)
+        days = int(r["jours_live"] or 0)
+        hours = float(r["heures_live"] or 0.0)
+
+        # activité
+        act_rate = creator_activity_rate(days, hours)
+
+        # Éligibilité % (à partir de 100K et activité valide)
+        eligible_pct = (amount >= CREATOR_MIN_DIAMONDS) and (act_rate > 0)
+
+        # Bonus fixe 50K (uniquement si <100K, pour éviter double rémunération)
+        fixed_bonus = 0
+        if (amount >= CREATOR_FIXED_MIN) and (amount < CREATOR_MIN_DIAMONDS):
+            if days >= 22 and hours >= 80:
+                fixed_bonus = CREATOR_FIXED_22_80
+            elif days >= 11 and hours >= 30:
+                fixed_bonus = CREATOR_FIXED_11_30
+
+        # Bonus évolution / stagnation / baisse (non cumulable)
+        prev_d = prev_month_diamonds(creator_id, hist)
+        prev_lvl = creator_level_index(prev_d)
+        cur_lvl = creator_level_index(amount)
+
+        bonus_rate = 0.0
+        bonus_code = ""
+        if eligible_pct:
+            if cur_lvl > prev_lvl and prev_d > 0:
+                bonus_rate = CREATOR_BONUS_EVOLUTION
+                bonus_code = "EVOL"
+            elif amount < prev_d and prev_d > 0:
+                bonus_rate = 0.0
+                bonus_code = "BAISSE"
+            else:
+                # stagnation possible uniquement si déjà passé 200K (même hors agence)
+                passed_200k = (amount >= 200_000) or (prev_d >= 200_000) or ever_passed_200k(creator_id, hist)
+                if passed_200k and cur_lvl == prev_lvl and cur_lvl > 0:
+                    bonus_rate = CREATOR_BONUS_STAGNATION
+                    bonus_code = "STAG"
+
+        # Récompenses
+        recomp_pct = amount * act_rate if eligible_pct else 0.0
+        bonus_pct = amount * bonus_rate if eligible_pct else 0.0
+
+        total = recomp_pct + bonus_pct + fixed_bonus
+        total = floor_1000(total)  # arrondi au millième inférieur
+
+        etat = "✅ Actif" if (eligible_pct or fixed_bonus > 0) else "⚠️ Inactif"
+        why = ""
+        if etat != "✅ Actif":
+            if amount < CREATOR_FIXED_MIN:
+                why = "Diamants < 50 000"
+            elif act_rate <= 0:
+                why = "Activité insuffisante"
+            elif amount < CREATOR_MIN_DIAMONDS:
+                why = "Diamants < 100 000"
+
         rows.append({
-            'creator_id':r['creator_id'],'creator_username':r['creator_username'],'groupe':r['groupe'],'agent':r['agent'],
-            'periode':r['periode'],'diamants':amount,'jours_live':r['jours_live'],'heures_live':r['heures_live'],
-            'type_createur':ctype.capitalize(),'etat_activite':etat,'raison_ineligibilite':why if etat!='✅ Actif' else '',
-            'recompense_palier_1':p1,'recompense_palier_2':p2,'bonus_debutant':bval,'bonus_code':bcode,
-            'total_createur':total,'actif_hierarchie':actif_hierarchie})
+            "creator_id": creator_id,
+            "creator_username": r["creator_username"],
+            "groupe": r["groupe"],
+            "agent": r["agent"],
+            "periode": r["periode"],
+            "diamants": amount,
+            "jours_live": days,
+            "heures_live": hours,
+            "type_createur": "Nouveau",
+            "etat_activite": etat,
+            "raison_ineligibilite": why if etat != "✅ Actif" else "",
+            "recompense_palier_1": floor_1000(recomp_pct),
+            "recompense_palier_2": int(fixed_bonus),
+            "bonus_debutant": floor_1000(bonus_pct),
+            "bonus_code": bonus_code,
+            "total_createur": int(total),
+            "actif_hierarchie": True if (eligible_pct or fixed_bonus > 0) else False,
+        })
+
     return pd.DataFrame(rows)
 
-def totals_hierarchy_by(field,crea):
-    if crea is None or crea.empty: return pd.DataFrame(columns=[field,'diamants_hierarchie'])
-    base = crea[crea['actif_hierarchie'] == True]
-    return base.groupby(field)['diamants'].sum().reset_index().rename(columns={'diamants':'diamants_hierarchie'})
+def totals_hierarchy_by(field: str, crea: pd.DataFrame) -> pd.DataFrame:
+    if crea is None or crea.empty:
+        return pd.DataFrame(columns=[field, "diamants_hierarchie"])
+    base = crea[crea["actif_hierarchie"] == True]
+    return base.groupby(field)["diamants"].sum().reset_index().rename(columns={"diamants": "diamants_hierarchie"})
 
-def percent_reward(total):
-    if total>=4_000_000:return total*0.03
-    if total>=200_000:return total*0.02
-    return 0.0
+def apply_agent_manager_settings(base_df: pd.DataFrame, kind: str) -> pd.DataFrame:
+    """Applique la tâche progressive et le bonus (validé) par ligne."""
+    if base_df is None or base_df.empty:
+        return base_df
 
-def sum_bonus_for(group_col:str,crea:pd.DataFrame,map_amount:dict)->pd.DataFrame:
-    if crea is None or crea.empty: return pd.DataFrame(columns=[group_col,'bonus_additionnel'])
-    tmp=crea[['creator_id',group_col,'bonus_code']].copy()
-    order={'B3':3,'B2':2,'B1':1,'':0}
-    tmp['rank']=tmp['bonus_code'].astype(str).str.upper().map(order).fillna(0)
-    tmp=tmp.sort_values(['creator_id','rank'],ascending=[True,False]).drop_duplicates('creator_id')
-    tmp['bonus_amount']=tmp['bonus_code'].astype(str).str.upper().map(map_amount).fillna(0)
-    agg=tmp.groupby(group_col)['bonus_amount'].sum().reset_index().rename(columns={'bonus_amount':'bonus_additionnel'})
-    return agg
+    if kind == "agent":
+        min_d = AGENT_MIN_DIAMONDS
+        commissions = AGENT_COMMISSION_BY_TASK
+        label_col = "agent"
+        prime_col = "prime_agent"
+    else:
+        min_d = MANAGER_MIN_DIAMONDS
+        commissions = MANAGER_COMMISSION_BY_TASK
+        label_col = "groupe"
+        prime_col = "prime_manager"
 
-def compute_agents(crea):
-    base=totals_hierarchy_by('agent',crea)
-    if base.empty:return pd.DataFrame(columns=['agent','diamants_mois','base_prime','bonus_additionnel','prime_agent','Facture €'])
-    base['base_prime']=base['diamants_hierarchie'].apply(percent_reward)
-    base['base_prime']=(np.floor(base['base_prime']/1000)*1000).astype(int)
-    b=sum_bonus_for('agent',crea,{'B2':1000,'B3':15000})
-    out=base.merge(b,on='agent',how='left').fillna({'bonus_additionnel':0})
-    out['prime_agent']=out['base_prime']+out['bonus_additionnel']
-    out['prime_agent']=(np.floor(out['prime_agent']/1000)*1000).astype(int)
-    out.rename(columns={'diamants_hierarchie':'diamants_mois'},inplace=True)
-    out['Facture €'] = (np.floor((out['base_prime'] * 0.0084) / 5) * 5).astype(int)
-    cols = ['agent','diamants_mois','base_prime','bonus_additionnel','prime_agent','Facture €']
+    out = base_df.copy()
+    # Sécurise valeurs
+    out["tache_progressive"] = out["tache_progressive"].astype(str).where(out["tache_progressive"].isin(commissions.keys()), "7%")
+    out["bonus_validé"] = out["bonus_validé"].astype(str).where(out["bonus_validé"].isin(BONUS_CHOICES.keys()), "0%")
+
+    out["commission_rate"] = out["tache_progressive"].map(commissions).fillna(commissions["7%"])
+    out["bonus_rate"] = out["bonus_validé"].map(BONUS_CHOICES).fillna(0.0)
+
+    out["taux_total"] = out["commission_rate"] + out["bonus_rate"]
+
+    # Minimum non reportable
+    out["base_prime"] = np.where(out["diamants_hierarchie"] >= min_d, out["diamants_hierarchie"] * out["commission_rate"], 0.0)
+    out["prime_total"] = np.where(out["diamants_hierarchie"] >= min_d, out["diamants_hierarchie"] * out["taux_total"], 0.0)
+
+    # Arrondi centaine inférieure
+    out["base_prime"] = out["base_prime"].apply(floor_100).astype(int)
+    out["prime_total"] = out["prime_total"].apply(floor_100).astype(int)
+
+    out = out.rename(columns={"diamants_hierarchie": "diamants_mois"})
+    out[prime_col] = out["prime_total"]
+
+    # Colonnes finales (sans toucher au reste du visuel)
+    cols = [label_col, "diamants_mois", "tache_progressive", "bonus_validé", "base_prime", prime_col]
     return out[cols]
-
-def compute_managers(crea):
-    base=totals_hierarchy_by('groupe',crea)
-    if base.empty:return pd.DataFrame(columns=['groupe','diamants_mois','base_prime','bonus_additionnel','prime_manager','Facture €'])
-    base['base_prime']=base['diamants_hierarchie'].apply(percent_reward)
-    base['base_prime']=(np.floor(base['base_prime']/1000)*1000).astype(int)
-    b=sum_bonus_for('groupe',crea,{'B2':1000,'B3':5000})
-    out=base.merge(b,on='groupe',how='left').fillna({'bonus_additionnel':0})
-    out['prime_manager']=out['base_prime']+out['bonus_additionnel']
-    out['prime_manager']=(np.floor(out['prime_manager']/1000)*1000).astype(int)
-    out.rename(columns={'diamants_hierarchie':'diamants_mois'},inplace=True)
-    out['Facture €'] = (np.floor((out['base_prime'] * 0.0084) / 5) * 5).astype(int)
-    cols = ['groupe','diamants_mois','base_prime','bonus_additionnel','prime_manager','Facture €']
-    return out[cols]
-
 # -----------------------------------------------------------------------------
 # PDF
 # -----------------------------------------------------------------------------
@@ -389,16 +448,62 @@ if f_cur:
                 except Exception: st.success("Données enregistrées")
 
     with t2:
-        ag=compute_agents(crea)
-        st.dataframe(ag,use_container_width=True)
-        st.download_button('CSV Agents',ag.to_csv(index=False).encode('utf-8'),'recompenses_agents.csv','text/csv')
-        safe_pdf('PDF Agents','Récompenses Agents',ag,'recompenses_agents.pdf')
+    # Base : diamants hiérarchie par agent (calculé depuis les créateurs)
+    base = totals_hierarchy_by('agent', crea)
+    if base.empty:
+        ag = pd.DataFrame(columns=['agent','diamants_mois','tache_progressive','bonus_validé','base_prime','prime_agent'])
+        st.dataframe(ag, use_container_width=True)
+    else:
+        base['tache_progressive'] = '7%'
+        base['bonus_validé'] = '0%'
+        st.caption("Sélectionne la tâche progressive et valide le bonus Backstage (non cumulable) pour chaque agent. Minimum 200K (non reportable).")
+
+        edited = st.data_editor(
+            base.rename(columns={'diamants_hierarchie':'diamants_hierarchie'}),
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "tache_progressive": st.column_config.SelectboxColumn("Tâche progressive", options=list(AGENT_COMMISSION_BY_TASK.keys())),
+                "bonus_validé": st.column_config.SelectboxColumn("Bonus validé", options=list(BONUS_CHOICES.keys())),
+            },
+            disabled=["agent","diamants_hierarchie"],
+            key="editor_agents_settings"
+        )
+
+        ag = apply_agent_manager_settings(edited, kind="agent")
+        st.dataframe(ag, use_container_width=True)
+
+    st.download_button('CSV Agents', ag.to_csv(index=False).encode('utf-8'), 'recompenses_agents.csv', 'text/csv')
+    safe_pdf('PDF Agents', 'Récompenses Agents', ag, 'recompenses_agents.pdf')
 
     with t3:
-        man=compute_managers(crea)
-        st.dataframe(man,use_container_width=True)
-        st.download_button('CSV Managers',man.to_csv(index=False).encode('utf-8'),'recompenses_managers.csv','text/csv')
-        safe_pdf('PDF Managers','Récompenses Managers',man,'recompenses_managers.pdf')
+    # Base : diamants hiérarchie par groupe/manager (calculé depuis les créateurs)
+    base = totals_hierarchy_by('groupe', crea)
+    if base.empty:
+        man = pd.DataFrame(columns=['groupe','diamants_mois','tache_progressive','bonus_validé','base_prime','prime_manager'])
+        st.dataframe(man, use_container_width=True)
+    else:
+        base['tache_progressive'] = '7%'
+        base['bonus_validé'] = '0%'
+        st.caption("Sélectionne la tâche progressive et valide le bonus Backstage (non cumulable) pour chaque manager. Minimum 1M (non reportable).")
+
+        edited = st.data_editor(
+            base.rename(columns={'diamants_hierarchie':'diamants_hierarchie'}),
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "tache_progressive": st.column_config.SelectboxColumn("Tâche progressive", options=list(MANAGER_COMMISSION_BY_TASK.keys())),
+                "bonus_validé": st.column_config.SelectboxColumn("Bonus validé", options=list(BONUS_CHOICES.keys())),
+            },
+            disabled=["groupe","diamants_hierarchie"],
+            key="editor_managers_settings"
+        )
+
+        man = apply_agent_manager_settings(edited, kind="manager")
+        st.dataframe(man, use_container_width=True)
+
+    st.download_button('CSV Managers', man.to_csv(index=False).encode('utf-8'), 'recompenses_managers.csv', 'text/csv')
+    safe_pdf('PDF Managers', 'Récompenses Managers', man, 'recompenses_managers.pdf')
 
 # -----------------------------------------------------------------------------
 # Footer
