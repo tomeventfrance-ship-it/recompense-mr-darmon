@@ -448,33 +448,52 @@ if f_cur:
                 except Exception: st.success("Données enregistrées")
 
     with t2:
-    # Base : diamants hiérarchie par agent (calculé depuis les créateurs)
+    # Base : diamants hiérarchie par agent
     base = totals_hierarchy_by('agent', crea)
+
     if base.empty:
         ag = pd.DataFrame(columns=['agent','diamants_mois','tache_progressive','bonus_validé','base_prime','prime_agent'])
         st.dataframe(ag, use_container_width=True)
+
     else:
         base['tache_progressive'] = '7%'
         base['bonus_validé'] = '0%'
-        st.caption("Sélectionne la tâche progressive et valide le bonus Backstage (non cumulable) pour chaque agent. Minimum 200K (non reportable).")
+
+        st.caption("Sélectionne la tâche progressive et valide le bonus Backstage (non cumulable). Minimum 200K.")
 
         edited = st.data_editor(
-            base.rename(columns={'diamants_hierarchie':'diamants_hierarchie'}),
+            base,
             hide_index=True,
             use_container_width=True,
             column_config={
-                "tache_progressive": st.column_config.SelectboxColumn("Tâche progressive", options=list(AGENT_COMMISSION_BY_TASK.keys())),
-                "bonus_validé": st.column_config.SelectboxColumn("Bonus validé", options=list(BONUS_CHOICES.keys())),
+                "tache_progressive": st.column_config.SelectboxColumn(
+                    "Tâche progressive",
+                    options=list(AGENT_COMMISSION_BY_TASK.keys())
+                ),
+                "bonus_validé": st.column_config.SelectboxColumn(
+                    "Bonus validé",
+                    options=list(BONUS_CHOICES.keys())
+                ),
             },
             disabled=["agent","diamants_hierarchie"],
-            key="editor_agents_settings"
         )
 
         ag = apply_agent_manager_settings(edited, kind="agent")
         st.dataframe(ag, use_container_width=True)
 
-    st.download_button('CSV Agents', ag.to_csv(index=False).encode('utf-8'), 'recompenses_agents.csv', 'text/csv')
-    safe_pdf('PDF Agents', 'Récompenses Agents', ag, 'recompenses_agents.pdf')
+    st.download_button(
+        'CSV Agents',
+        ag.to_csv(index=False).encode('utf-8'),
+        'recompenses_agents.csv',
+        'text/csv'
+    )
+
+    safe_pdf(
+        'PDF Agents',
+        'Récompenses Agents',
+        ag,
+        'recompenses_agents.pdf'
+    )
 
     with t3:
     # Base : diamants hiérarchie par groupe/manager (calculé depuis les créateurs)
