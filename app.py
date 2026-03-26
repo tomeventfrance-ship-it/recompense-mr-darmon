@@ -262,7 +262,7 @@ def compute_creators(df: pd.DataFrame, hist: pd.DataFrame) -> pd.DataFrame:
         why = ""
         if etat != "✅ Actif":
             if amount < CREATOR_FIXED_MIN:
-                why = "Diamants < 50 000"
+                why = "Diamants < 100"
             elif act_rate <= 0:
                 why = "Activité insuffisante"
             elif amount < CREATOR_MIN_DIAMONDS:
