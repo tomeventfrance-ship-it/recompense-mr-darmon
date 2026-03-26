@@ -46,7 +46,7 @@ creators:
       rate_add: 0.0
   fixed_rewards_50k:
     enabled: true
-    min_diamonds: 50000
+    min_diamonds: 100
     apply_only_if_below_min_diamonds: true
     rules:
     - condition: '>=11j & >=30h'
