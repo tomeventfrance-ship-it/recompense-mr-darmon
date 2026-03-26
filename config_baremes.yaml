@@ -1,6 +1,6 @@
 version: 2026-03
 creators:
-  min_diamonds: 100000
+  min_diamonds: 100
   levels:
   - name: Niveau 1
     base: 100000
