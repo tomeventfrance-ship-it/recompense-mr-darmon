@@ -149,6 +149,11 @@ BONUS_CHOICES = {"0%": 0.0, "+0,5%": 0.005, "+1%": 0.01}  # non cumulable
 MANAGER_MIN_DIAMONDS = 1_000_000  # non reportable
 MANAGER_COMMISSION_BY_TASK = {"5%": 0.02, "7%": 0.03, "9%": 0.04}
 
+# Seuils de comptabilisation hiérarchie (agents / managers uniquement)
+HIERARCHY_MIN_DIAMONDS = 1_000
+HIERARCHY_MIN_DAYS = 11
+HIERARCHY_MIN_HOURS = 30
+
 def floor_1000(x: float) -> int:
     """Arrondi au millième inférieur."""
     return int(x // 1000) * 1000
@@ -285,7 +290,11 @@ def compute_creators(df: pd.DataFrame, hist: pd.DataFrame) -> pd.DataFrame:
             "bonus_debutant": floor_1000(bonus_pct),
             "bonus_code": bonus_code,
             "total_createur": int(total),
-            "actif_hierarchie": True if (eligible_pct or fixed_bonus > 0) else False,
+            "actif_hierarchie": (
+    (amount >= HIERARCHY_MIN_DIAMONDS)
+    and (days >= HIERARCHY_MIN_DAYS)
+    and (hours >= HIERARCHY_MIN_HOURS)
+),
         })
 
     return pd.DataFrame(rows)
